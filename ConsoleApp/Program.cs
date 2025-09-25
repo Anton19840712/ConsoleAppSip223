@@ -2,10 +2,12 @@
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Media;
+using SIPSorceryMedia.Abstractions;
 using ConsoleApp.EventHandlers;
 using ConsoleApp.CleanupHandlers;
 using ConsoleApp.SipOperations;
 using ConsoleApp.Configuration;
+using ConsoleApp.WebServer;
 using Microsoft.Extensions.Configuration;
 
 class SafeSipCaller
@@ -23,6 +25,10 @@ class SafeSipCaller
 	private static SipEventHandler? _eventChain;
 	private static CleanupHandler? _cleanupChain;
 	private static SipWorkflow? _workflow;
+	// Web Server для получения аудио из браузера
+	private static SimpleHttpServer? _webServer;
+	// Custom AudioSource для передачи браузерного аудио в SIP
+	private static BrowserAudioSource? _browserAudioSource;
 
 	/// <summary>
 	/// Точка входа в приложение для выполнения безопасного SIP звонка
@@ -33,10 +39,10 @@ class SafeSipCaller
 		// Загружаем конфигурацию приложения из appsettings.json
 		LoadConfiguration();
 
-		Console.WriteLine("=== Безопасный реальный SIP звонок ===");
+		Console.WriteLine("=== SIP звонок с WebRTC Audio мостом ===");
 		Console.WriteLine($"Звоним: {_config.SipConfiguration.CallerUsername} → {_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}");
-		Console.WriteLine("Максимальная защита от зависания!");
-		Console.WriteLine("=====================================\n");
+		Console.WriteLine("🎙️ Аудио: Браузер (микрофон) → WebSocket → SIP RTP");
+		Console.WriteLine("==========================================\n");
 
 		// Принудительный выход через заданное время (защита от зависания)
 		// Используем Timer для гарантированного завершения программы
@@ -46,6 +52,9 @@ class SafeSipCaller
 		{
 			Console.WriteLine("Сеть работает (проверено в предыдущем тесте)");
 			Console.WriteLine($"Сервер доступен: {_config.SipConfiguration.Server} (5.135.215.43)\n");
+
+			// Запускаем веб-сервер для получения аудио из браузера
+			StartWebServer();
 
 			using (var cts = new CancellationTokenSource(_config.CallSettings.GeneralTimeoutMs))
 			{
@@ -64,6 +73,7 @@ class SafeSipCaller
 		{
 			Console.WriteLine("\nНачинаем безопасную очистку...");
 			SafeCleanup();
+			StopWebServer();
 			Console.WriteLine("Очистка завершена");
 
 			_forceExitTimer?.Dispose();
@@ -73,6 +83,79 @@ class SafeSipCaller
 			var exitTask = Task.Run(() => Console.ReadLine());
 			var timeoutTask = Task.Delay(3000);
 			await Task.WhenAny(exitTask, timeoutTask);
+		}
+	}
+
+	/// <summary>
+	/// Запускает веб-сервер для получения аудио из браузера
+	/// </summary>
+	private static void StartWebServer()
+	{
+		try
+		{
+			_webServer = new SimpleHttpServer("http://localhost:8080/");
+
+			// Подписываемся на получение аудио данных
+			_webServer.OnAudioDataReceived += (audioData) =>
+			{
+				Console.WriteLine($"🎤 Получены аудио данные из браузера: {audioData.Length} байт");
+				// Здесь будем интегрировать с SIP медиа-сессией
+				ProcessBrowserAudio(audioData);
+			};
+
+			// Запускаем сервер в фоновом режиме
+			_ = Task.Run(() => _webServer.StartAsync());
+
+			Console.WriteLine("🌐 Веб-сервер запущен на http://localhost:8080/");
+			Console.WriteLine("📱 Откройте браузер для захвата микрофона");
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine($"⚠️ Ошибка запуска веб-сервера: {ex.Message}");
+		}
+	}
+
+	/// <summary>
+	/// Останавливает веб-сервер
+	/// </summary>
+	private static void StopWebServer()
+	{
+		try
+		{
+			_webServer?.Stop();
+			Console.WriteLine("🌐 Веб-сервер остановлен");
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine($"⚠️ Ошибка остановки веб-сервера: {ex.Message}");
+		}
+	}
+
+	/// <summary>
+	/// Обрабатывает аудио данные, полученные из браузера
+	/// </summary>
+	/// <param name="audioData">Аудио данные в формате WebM/Opus</param>
+	private static void ProcessBrowserAudio(byte[] audioData)
+	{
+		try
+		{
+			Console.WriteLine($"🔄 Обрабатываем аудио: {audioData.Length} байт WebM/Opus");
+			Console.WriteLine($"   Состояние: _callActive={_callActive}, _mediaSession={(_mediaSession != null ? "есть" : "null")}");
+
+			if (_browserAudioSource != null)
+			{
+				// Передаем аудио в BrowserAudioSource для конвертации и передачи в RTP
+				_browserAudioSource.QueueBrowserAudio(audioData);
+				Console.WriteLine("📡 Аудио передано в BrowserAudioSource для обработки");
+			}
+			else
+			{
+				Console.WriteLine("⚠️ BrowserAudioSource не инициализирован");
+			}
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine($"⚠️ Ошибка обработки браузерного аудио: {ex.Message}");
 		}
 	}
 
@@ -89,10 +172,21 @@ class SafeSipCaller
 			Console.WriteLine("  SIP транспорт создан");
 		}, _config.CallSettings.TransportTimeoutMs, cancellationToken);
 
-		Console.WriteLine($"Шаг 2: Создание простой медиа-сессии (таймаут {_config.CallSettings.MediaTimeoutMs / 1000}с)...");
+		Console.WriteLine($"Шаг 2: Создание медиа-сессии с браузерным аудио (таймаут {_config.CallSettings.MediaTimeoutMs / 1000}с)...");
 		await RunWithTimeout(async () => {
-			_mediaSession = new VoIPMediaSession();
-			Console.WriteLine("  Простая медиа-сессия создана (send only, без устройств)");
+			// Создаем custom audio source для браузерного аудио
+			_browserAudioSource = new BrowserAudioSource();
+
+			// Создаем медиа-сессию с нашим custom audio source
+			var mediaEndPoints = new MediaEndPoints
+			{
+				AudioSource = _browserAudioSource
+			};
+			_mediaSession = new VoIPMediaSession(mediaEndPoints);
+
+			Console.WriteLine("  ✅ Медиа-сессия создана с BrowserAudioSource!");
+			Console.WriteLine("     Теперь аудио из браузера будет передаваться в SIP RTP поток");
+
 			await Task.Delay(100);
 		}, _config.CallSettings.MediaTimeoutMs, cancellationToken);
 
@@ -106,6 +200,9 @@ class SafeSipCaller
 			_userAgent.ClientCallAnswered += (uac, resp) => {
 				_eventChain?.Handle("Answered", resp);
 				_workflow?.HandleSipEvent("Answered");
+				// Устанавливаем флаг активного звонка
+				_callActive = true;
+				Console.WriteLine("✅ _callActive = true - звонок активен для передачи аудио!");
 			};
 
 			_userAgent.ClientCallFailed += (uac, err, resp) => {
@@ -126,6 +223,9 @@ class SafeSipCaller
 			_userAgent.OnCallHungup += (dlg) => {
 				_eventChain?.Handle("Hangup", dlg);
 				_workflow?.HandleSipEvent("Hangup");
+				// Сбрасываем флаг активного звонка
+				_callActive = false;
+				Console.WriteLine("❌ _callActive = false - звонок завершен");
 			};
 
 			Console.WriteLine("  События настроены через Chain of Responsibility");
