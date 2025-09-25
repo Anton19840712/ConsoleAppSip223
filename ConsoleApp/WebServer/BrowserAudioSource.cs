@@ -21,14 +21,14 @@ namespace ConsoleApp.WebServer
         public event RawAudioSampleDelegate? OnAudioSourceRawSample;
 
         /// <summary>
-        /// Поддерживаемые аудио форматы - G.711 PCMU для совместимости с SIP
+        /// Поддерживаемые аудио форматы - G.711 A-law приоритет для лучшего качества
         /// </summary>
         public List<AudioFormat> GetAudioSourceFormats()
         {
             return new List<AudioFormat>
             {
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU), // G.711 μ-law
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA)  // G.711 A-law
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA), // G.711 A-law (приоритет)
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU)  // G.711 μ-law
             };
         }
 
@@ -37,7 +37,17 @@ namespace ConsoleApp.WebServer
         /// </summary>
         public void SetAudioSourceFormat(AudioFormat audioFormat)
         {
-            Console.WriteLine($"🎵 BrowserAudioSource: установлен формат {audioFormat.ToString()}");
+            // Определяем тип кодирования по формату
+            if (audioFormat.FormatID == (int)SDPWellKnownMediaFormatsEnum.PCMA)
+            {
+                _useAlaw = true;
+                Console.WriteLine($"🎵 BrowserAudioSource: установлен формат G.711 A-law");
+            }
+            else
+            {
+                _useAlaw = false;
+                Console.WriteLine($"🎵 BrowserAudioSource: установлен формат G.711 μ-law");
+            }
         }
 
         /// <summary>
@@ -178,25 +188,42 @@ namespace ConsoleApp.WebServer
             var frame = new byte[samplesPerFrame];
             int bytesRead = 0;
 
-            for (int i = 0; i < samplesPerFrame && _continuousAudioBuffer.Count > 0; i++)
+            // Отправляем данные как только они есть, без минимального буфера
+            if (_continuousAudioBuffer.Count >= samplesPerFrame)
             {
-                frame[i] = _continuousAudioBuffer.Dequeue();
-                bytesRead++;
+                // Есть достаточно данных для полного кадра
+                for (int i = 0; i < samplesPerFrame; i++)
+                {
+                    frame[i] = _continuousAudioBuffer.Dequeue();
+                    bytesRead++;
+                }
             }
-
-            // Дополняем тишиной если данных недостаточно
-            if (bytesRead < samplesPerFrame)
+            else if (_continuousAudioBuffer.Count > 0)
             {
-                Array.Fill(frame, (byte)0x80, bytesRead, samplesPerFrame - bytesRead); // μ-law silence
+                // Есть некоторые данные - используем их и дополняем тишиной
+                int availableBytes = _continuousAudioBuffer.Count;
+                for (int i = 0; i < availableBytes; i++)
+                {
+                    frame[i] = _continuousAudioBuffer.Dequeue();
+                    bytesRead++;
+                }
+                // Дополняем остальное тишиной
+                Array.Fill(frame, (byte)0xFF, availableBytes, samplesPerFrame - availableBytes);
+            }
+            else
+            {
+                // Нет данных - отправляем тишину
+                Array.Fill(frame, (byte)0xFF, 0, samplesPerFrame);
+                bytesRead = 0;
             }
 
             // Отправляем кадр в RTP поток
             OnAudioSourceEncodedSample.Invoke(8000, frame);
 
             // Логируем состояние буфера
-            if (_continuousAudioBuffer.Count % 1000 == 0 || _continuousAudioBuffer.Count > 5000)
+            if (_continuousAudioBuffer.Count % 500 == 0 || _continuousAudioBuffer.Count > 2000 || bytesRead == 0)
             {
-                Console.WriteLine($"📡 RTP кадр: {bytesRead}/{samplesPerFrame} байт, буфер: {_continuousAudioBuffer.Count}");
+                Console.WriteLine($"📡 RTP: {bytesRead}/{samplesPerFrame}, буфер: {_continuousAudioBuffer.Count}, статус: {(bytesRead > 0 ? "АУДИО" : "ТИШИНА")}");
             }
         }
 
@@ -233,46 +260,99 @@ namespace ConsoleApp.WebServer
                     Console.WriteLine($"  Сэмпл {i}: байты [{pcmData[byteIndex]:X2} {pcmData[byteIndex + 1]:X2}] → Int16: {sample}");
                 }
 
-                // Конвертируем в G.711 μ-law
-                mulawData[i] = LinearToMuLaw(sample);
+                // Конвертируем в G.711 (μ-law или A-law автоматически)
+                mulawData[i] = LinearToG711(sample);
             }
 
             Console.WriteLine($"✅ Конвертация завершена: {sampleCount} μ-law байт");
             return mulawData;
         }
 
+        private static bool _useAlaw = false; // Будет установлено при выборе формата
+
         /// <summary>
-        /// Конвертирует линейный PCM в G.711 μ-law формат
+        /// Конвертирует линейный PCM в G.711 формат (A-law или μ-law)
+        /// </summary>
+        private static byte LinearToG711(short sample)
+        {
+            return _useAlaw ? LinearToALaw(sample) : LinearToMuLaw(sample);
+        }
+
+        /// <summary>
+        /// Конвертирует линейный PCM в G.711 μ-law формат (улучшенная реализация)
         /// </summary>
         private static byte LinearToMuLaw(short sample)
         {
-            // Упрощенная реализация μ-law кодирования
             const short BIAS = 0x84;
             const short CLIP = 32635;
 
-            if (sample >= 0)
-            {
-                sample = (short)Math.Min(sample, CLIP);
-            }
-            else
-            {
-                sample = (short)Math.Max((int)sample, -(int)CLIP);
-                sample = (short)-sample;
-            }
+            // Сохраняем знак
+            bool isNegative = sample < 0;
+            if (isNegative) sample = (short)-sample;
 
+            // Ограничиваем амплитуду
+            if (sample > CLIP) sample = CLIP;
+
+            // Добавляем смещение
             sample = (short)(sample + BIAS);
 
+            // Находим позицию старшего бита
             int exponent = 7;
-            for (int i = 0x4000; i > 0; i >>= 1)
+            for (int testBit = 0x4000; testBit > 0; testBit >>= 1)
             {
-                if ((sample & i) != 0) break;
+                if ((sample & testBit) != 0) break;
                 exponent--;
             }
 
+            // Извлекаем мантиссу
             int mantissa = (sample >> (exponent + 3)) & 0x0F;
+
+            // Формируем μ-law байт
             byte result = (byte)((exponent << 4) | mantissa);
 
-            return (byte)(~result);
+            // Инвертируем и добавляем знак
+            result = (byte)~result;
+            if (!isNegative) result |= 0x80;
+
+            return result;
+        }
+
+        /// <summary>
+        /// Конвертирует линейный PCM в G.711 A-law формат
+        /// </summary>
+        private static byte LinearToALaw(short sample)
+        {
+            const short CLIP = 32635;
+
+            // Сохраняем знак
+            bool isNegative = sample < 0;
+            if (isNegative) sample = (short)-sample;
+
+            // Ограничиваем амплитуду
+            if (sample > CLIP) sample = CLIP;
+
+            // A-law компрессия
+            byte result;
+            if (sample < 256)
+            {
+                result = (byte)(sample >> 4);
+            }
+            else
+            {
+                int exponent = 7;
+                for (int testBit = 0x4000; testBit > 0; testBit >>= 1)
+                {
+                    if ((sample & testBit) != 0) break;
+                    exponent--;
+                }
+
+                int mantissa = (sample >> (exponent + 3)) & 0x0F;
+                result = (byte)(((exponent - 1) << 4) | mantissa);
+            }
+
+            // Добавляем знак и XOR с 0x55
+            if (!isNegative) result |= 0x80;
+            return (byte)(result ^ 0x55);
         }
 
         public void Dispose()

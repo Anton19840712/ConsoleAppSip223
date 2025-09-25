@@ -182,33 +182,64 @@ namespace ConsoleApp.WebServer
                 log('✅ Доступ к микрофону получен');
 
                 // Создаем Web Audio API контекст для получения RAW PCM
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                    sampleRate: 8000  // Используем 8kHz для G.711
-                });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+                // Проверяем реальную частоту дискретизации
+                console.log('AudioContext sample rate:', audioContext.sampleRate);
+                log(`🔊 Реальная частота: ${audioContext.sampleRate} Hz (нужно 8000 Hz)`);
 
                 // Создаем узлы аудио графа
                 microphone = audioContext.createMediaStreamSource(stream);
 
                 // ScriptProcessorNode для обработки аудио в реальном времени
-                processor = audioContext.createScriptProcessor(1024, 1, 1);
+                // Используем меньший буфер для более частой отправки
+                processor = audioContext.createScriptProcessor(256, 1, 1);
 
                 processor.onaudioprocess = function(e) {
                     if (isRecording) {
                         const inputBuffer = e.inputBuffer;
                         const inputData = inputBuffer.getChannelData(0); // Получаем mono канал
 
-                        // Конвертируем Float32 в Int16 (PCM 16-bit)
-                        const pcmData = new Int16Array(inputData.length);
-                        for (let i = 0; i < inputData.length; i++) {
-                            // Нормализуем float (-1.0 to 1.0) в int16 (-32768 to 32767)
-                            pcmData[i] = Math.round(inputData[i] * 32767);
+                        // Ресемплинг: конвертируем с реальной частоты в 8kHz
+                        const targetSampleRate = 8000;
+                        const sourceSampleRate = audioContext.sampleRate;
+                        const resampleRatio = targetSampleRate / sourceSampleRate;
+                        const targetLength = Math.floor(inputData.length * resampleRatio);
+
+                        const resampledData = new Float32Array(targetLength);
+
+                        // Простой линейный ресемплинг
+                        for (let i = 0; i < targetLength; i++) {
+                            const sourceIndex = i / resampleRatio;
+                            const index = Math.floor(sourceIndex);
+                            const fraction = sourceIndex - index;
+
+                            if (index + 1 < inputData.length) {
+                                // Линейная интерполяция
+                                resampledData[i] = inputData[index] * (1 - fraction) + inputData[index + 1] * fraction;
+                            } else {
+                                resampledData[i] = inputData[index];
+                            }
                         }
 
-                        // Добавляем в буфер
+                        // Конвертируем ресемплированные данные в Int16
+                        const pcmData = new Int16Array(targetLength);
+                        for (let i = 0; i < targetLength; i++) {
+                            let sample = resampledData[i];
+
+                            // Применяем мягкое ограничение
+                            if (sample > 0.98) sample = 0.98;
+                            if (sample < -0.98) sample = -0.98;
+
+                            // Конвертация в Int16
+                            pcmData[i] = Math.round(sample * 32767);
+                        }
+
+                        // Всегда добавляем данные в буфер
                         audioBuffer.push(pcmData);
 
-                        // Отправляем чаще - каждые ~250ms (2 чанка по 1024 сэмпла при 8kHz)
-                        if (audioBuffer.length >= 2) {
+                        // Отправляем каждый блок отдельно
+                        if (audioBuffer.length >= 1) {
                             sendPCMToBackend();
                             audioBuffer = [];
                         }
