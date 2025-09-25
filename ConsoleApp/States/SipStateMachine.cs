@@ -1,5 +1,8 @@
 namespace ConsoleApp.States
 {
+    /// <summary>
+    /// Машина состояний для отслеживания состояния SIP звонка
+    /// </summary>
     public class SipStateMachine
     {
         private SipCallState _currentState = SipCallState.Idle;
@@ -8,6 +11,11 @@ namespace ConsoleApp.States
 
         public event Action<SipCallState, SipCallState>? StateChanged;
 
+        /// <summary>
+        /// Проверяет, возможен ли переход в указанное новое состояние
+        /// </summary>
+        /// <param name="newState">Новое состояние для перехода</param>
+        /// <returns>true, если переход возможен; иначе false</returns>
         public bool CanTransitionTo(SipCallState newState)
         {
             return newState switch
@@ -39,28 +47,41 @@ namespace ConsoleApp.States
             };
         }
 
+        /// <summary>
+        /// Выполняет переход в новое состояние, если он допустим
+        /// </summary>
+        /// <param name="newState">Новое состояние</param>
+        /// <returns>true, если переход выполнен успешно; иначе false</returns>
         public bool TransitionTo(SipCallState newState)
         {
             if (!CanTransitionTo(newState))
             {
-                Console.WriteLine($"⚠️ Недопустимый переход: {_currentState} → {newState}");
+                Console.WriteLine($"Предупреждение: Недопустимый переход: {_currentState} → {newState}");
                 return false;
             }
 
             var oldState = _currentState;
             _currentState = newState;
 
-            Console.WriteLine($"🔄 Состояние: {oldState} → {newState}");
+            Console.WriteLine($"Состояние: {oldState} → {newState}");
             StateChanged?.Invoke(oldState, newState);
 
             return true;
         }
 
+        /// <summary>
+        /// Сбрасывает машину состояний в начальное состояние (Idle)
+        /// </summary>
         public void Reset()
         {
             TransitionTo(SipCallState.Idle);
         }
 
+        /// <summary>
+        /// Получает читаемое описание состояния на русском языке
+        /// </summary>
+        /// <param name="state">Состояние для описания</param>
+        /// <returns>Описание состояния на русском языке</returns>
         public string GetStateDescription(SipCallState state)
         {
             return state switch
