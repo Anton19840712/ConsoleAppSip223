@@ -28,14 +28,28 @@ namespace ConsoleApp.WebServer
         public event RawAudioSampleDelegate? OnAudioSourceRawSample;
 
         /// <summary>
-        /// Поддерживаемые аудио форматы - G.711 A-law приоритет для лучшего качества
+        /// Поддерживаемые аудио форматы - широкий спектр кодеков для лучшего качества
         /// </summary>
         public List<AudioFormat> GetAudioSourceFormats()
         {
             return new List<AudioFormat>
             {
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA), // G.711 A-law (приоритет)
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU)  // G.711 μ-law
+                // Высококачественные кодеки (в порядке приоритета)
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.G722),    // G.722 - широкополосный звук (50-7000Hz)
+
+                // Opus (динамический payload type) - высочайшее качество
+                new AudioFormat(111, "opus", 48000, 2, "useinbandfec=1;minptime=10"),
+
+                // G.729 - хорошее сжатие и качество
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.G729),
+
+                // Linear PCM форматы для максимального качества
+                new AudioFormat(117, "L16", 16000, 1),  // 16kHz linear PCM
+                new AudioFormat(118, "L16", 8000, 1),   // 8kHz linear PCM
+
+                // Стандартные G.711 кодеки (запасной вариант)
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA),    // G.711 A-law
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU)     // G.711 μ-law
             };
         }
 
@@ -50,10 +64,30 @@ namespace ConsoleApp.WebServer
                 _useAlaw = true;
                 _logger.LogInformation("BrowserAudioSource: установлен формат G.711 A-law");
             }
+            else if (audioFormat.FormatID == (int)SDPWellKnownMediaFormatsEnum.G722)
+            {
+                _useAlaw = false; // G.722 использует свою логику
+                _logger.LogInformation("BrowserAudioSource: установлен формат G.722 (широкополосный)");
+            }
+            else if (audioFormat.FormatName?.ToLower() == "opus")
+            {
+                _useAlaw = false;
+                _logger.LogInformation("BrowserAudioSource: установлен формат Opus (высокое качество)");
+            }
+            else if (audioFormat.FormatID == (int)SDPWellKnownMediaFormatsEnum.G729)
+            {
+                _useAlaw = false;
+                _logger.LogInformation("BrowserAudioSource: установлен формат G.729");
+            }
+            else if (audioFormat.FormatName?.ToLower() == "l16")
+            {
+                _useAlaw = false;
+                _logger.LogInformation("BrowserAudioSource: установлен формат L16 (Linear PCM) @ {ClockRate}Hz", audioFormat.ClockRate);
+            }
             else
             {
                 _useAlaw = false;
-                _logger.LogInformation("BrowserAudioSource: установлен формат G.711 μ-law");
+                _logger.LogInformation("BrowserAudioSource: установлен формат G.711 μ-law (по умолчанию)");
             }
         }
 
@@ -195,39 +229,34 @@ namespace ConsoleApp.WebServer
             var frame = new byte[samplesPerFrame];
             int bytesRead = 0;
 
-            // Отправляем полные кадры и частичные кадры с плавным затуханием
+            // Простая и надежная логика: отправляем все данные, только если буфер достаточно заполнен
             if (_continuousAudioBuffer.Count >= samplesPerFrame)
             {
-                // Есть достаточно данных для полного кадра
+                // Есть полный кадр - отправляем его
                 for (int i = 0; i < samplesPerFrame; i++)
                 {
                     frame[i] = _continuousAudioBuffer.Dequeue();
                     bytesRead++;
                 }
+                OnAudioSourceEncodedSample.Invoke(8000, frame);
             }
-            else if (_continuousAudioBuffer.Count > 80)  // Отправляем только если достаточно данных (50% кадра)
+            else if (_continuousAudioBuffer.Count > 0 && _continuousAudioBuffer.Count >= 80) // Половина кадра
             {
-                // Частичный кадр - отправляем только значительные фрагменты
-                int availableBytes = _continuousAudioBuffer.Count;
-                for (int i = 0; i < availableBytes; i++)
+                // Есть частичный кадр (минимум половина) - отправляем с дополнением
+                for (int i = 0; i < samplesPerFrame && _continuousAudioBuffer.Count > 0; i++)
                 {
                     frame[i] = _continuousAudioBuffer.Dequeue();
                     bytesRead++;
                 }
-                // Остальное дополняем тишиной
-                Array.Fill(frame, (byte)0x80, availableBytes, samplesPerFrame - availableBytes);
-            }
-            else
-            {
-                // Нет данных - НЕ отправляем пустые кадры (это устраняет щелчки тишины)
-                bytesRead = 0;
-            }
 
-            // Отправляем кадр в RTP поток ТОЛЬКО если есть реальные аудио данные
-            if (bytesRead > 0)
-            {
+                // Дополняем правильной тишиной
+                if (bytesRead < samplesPerFrame)
+                {
+                    Array.Fill(frame, (byte)0x80, bytesRead, samplesPerFrame - bytesRead);
+                }
                 OnAudioSourceEncodedSample.Invoke(8000, frame);
             }
+            // Если данных слишком мало (меньше половины кадра) - ждем накопления
 
             // Логируем состояние буфера
             if (_continuousAudioBuffer.Count % 500 == 0 || _continuousAudioBuffer.Count > 2000 || bytesRead == 0)

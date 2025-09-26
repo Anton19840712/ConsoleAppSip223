@@ -34,7 +34,8 @@ namespace ConsoleApp.States
 
                 SipCallState.Registered => _currentState == SipCallState.Registering,
 
-                SipCallState.Calling => _currentState == SipCallState.Registered,
+                SipCallState.Calling => _currentState == SipCallState.Registered ||
+                                        _currentState == SipCallState.Idle, // Allow direct calling without registration
 
                 SipCallState.Trying => _currentState == SipCallState.Calling,
 
@@ -44,7 +45,11 @@ namespace ConsoleApp.States
 
                 SipCallState.Disconnecting => _currentState == SipCallState.Connected ||
                                              _currentState == SipCallState.Ringing ||
-                                             _currentState == SipCallState.Trying,
+                                             _currentState == SipCallState.Trying ||
+                                             _currentState == SipCallState.Calling ||
+                                             _currentState == SipCallState.Failed ||
+                                             _currentState == SipCallState.Registered ||
+                                             _currentState == SipCallState.Registering,
 
                 SipCallState.Failed => _currentState != SipCallState.Idle &&
                                       _currentState != SipCallState.Finished,
