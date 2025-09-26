@@ -1,5 +1,7 @@
 using ConsoleApp.Services;
 using ConsoleApp.WebServer;
+using ConsoleApp.SipOperations;
+using ConsoleApp.States;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog;
@@ -12,11 +14,12 @@ namespace ConsoleApp.DependencyInjection
         public static IServiceCollection AddApplicationServices(this IServiceCollection services)
         {
             // Регистрируем Serilog
-            var logFileName = $"Logs/sip-app-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}.log";
+            var currentDirectory = Directory.GetCurrentDirectory();
+            var logFileName = Path.Combine(currentDirectory, "Logs", $"sip-app-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}.log");
 
             // Создаем папку для логов если она не существует
             var logsDirectory = Path.GetDirectoryName(logFileName);
-            if (!string.IsNullOrEmpty(logsDirectory) && !Directory.Exists(logsDirectory))
+            if (!string.IsNullOrEmpty(logsDirectory))
             {
                 Directory.CreateDirectory(logsDirectory);
             }
@@ -26,7 +29,8 @@ namespace ConsoleApp.DependencyInjection
                 .WriteTo.File(
                     logFileName,
                     rollingInterval: RollingInterval.Infinite,
-                    outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+                    outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] [{Level:u3}] {Message:lj}{NewLine}{Exception}",
+                    flushToDiskInterval: TimeSpan.FromSeconds(1))
                 .CreateLogger();
 
             // Регистрируем ILoggerFactory с Serilog
@@ -47,6 +51,14 @@ namespace ConsoleApp.DependencyInjection
             {
                 var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<BrowserAudioSource>();
                 return new BrowserAudioSource(logger);
+            });
+
+            // Регистрируем SipWorkflow
+            services.AddTransient<SipWorkflow>(provider =>
+            {
+                var workflowLogger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<SipWorkflow>();
+                var stateMachineLogger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<SipStateMachine>();
+                return new SipWorkflow(workflowLogger, stateMachineLogger);
             });
 
             return services;

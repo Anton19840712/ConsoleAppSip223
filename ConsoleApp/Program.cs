@@ -416,7 +416,7 @@ class SafeSipCaller
 	/// </summary>
 	private static void SetupWorkflow()
 	{
-		_workflow = new SipWorkflow();
+		_workflow = _serviceProvider!.GetRequiredService<SipWorkflow>();
 
 		// Добавляем операции в workflow
 		if (_sipTransport != null)
@@ -450,12 +450,9 @@ class SafeSipCaller
 			_config = new AppConfiguration();
 			configuration.Bind(_config);
 
-			Console.WriteLine("Конфигурация загружена из appsettings.json");
 		}
 		catch (Exception ex)
 		{
-			Console.WriteLine($"Предупреждение: Ошибка загрузки конфигурации: {ex.Message}");
-			Console.WriteLine("Используются значения по умолчанию");
 		}
 	}
 

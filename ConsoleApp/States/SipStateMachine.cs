@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace ConsoleApp.States
 {
     /// <summary>
@@ -6,6 +8,12 @@ namespace ConsoleApp.States
     public class SipStateMachine
     {
         private SipCallState _currentState = SipCallState.Idle;
+        private readonly ILogger<SipStateMachine> _logger;
+
+        public SipStateMachine(ILogger<SipStateMachine> logger)
+        {
+            _logger = logger;
+        }
 
         public SipCallState CurrentState => _currentState;
 
@@ -56,14 +64,14 @@ namespace ConsoleApp.States
         {
             if (!CanTransitionTo(newState))
             {
-                Console.WriteLine($"Предупреждение: Недопустимый переход: {_currentState} → {newState}");
+                _logger.LogWarning("Недопустимый переход: {CurrentState} → {NewState}", _currentState, newState);
                 return false;
             }
 
             var oldState = _currentState;
             _currentState = newState;
 
-            Console.WriteLine($"Состояние: {oldState} → {newState}");
+            _logger.LogInformation("Состояние: {OldState} → {NewState}", oldState, newState);
             StateChanged?.Invoke(oldState, newState);
 
             return true;

@@ -20,6 +20,7 @@ namespace ConsoleApp.EventHandlers
         /// <param name="eventType">Тип события</param>
         /// <param name="eventData">Данные события</param>
         protected override void ProcessEvent(string eventType, object eventData)
-            => Console.WriteLine("Телефон звонит у romaous! Ждем ответа...");
+        {
+        }
     }
 }

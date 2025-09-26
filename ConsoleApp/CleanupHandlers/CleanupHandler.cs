@@ -24,7 +24,7 @@ namespace ConsoleApp.CleanupHandlers
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"    Предупреждение: Ошибка в {GetType().Name}: {ex.Message}");
+                
             }
             finally
             {

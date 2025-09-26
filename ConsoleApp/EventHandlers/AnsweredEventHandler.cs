@@ -30,7 +30,7 @@ namespace ConsoleApp.EventHandlers
         /// <param name="eventData">Данные события</param>
         protected override void ProcessEvent(string eventType, object eventData)
         {
-            Console.WriteLine("Звонок принят romaous! Соединение установлено!");
+            
             _setCallActive(true);
         }
     }

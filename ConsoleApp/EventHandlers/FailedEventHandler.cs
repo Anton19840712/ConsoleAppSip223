@@ -33,8 +33,8 @@ namespace ConsoleApp.EventHandlers
         protected override void ProcessEvent(string eventType, object eventData)
         {
             var (error, response) = ((string, SIPResponse))eventData;
-            Console.WriteLine($"Звонок не удался: {error}");
-            if (response != null) Console.WriteLine($"   SIP ответ: {response.Status} - {response.ReasonPhrase}");
+            
+            if (response != null) 
             _setCallActive(false);
         }
     }

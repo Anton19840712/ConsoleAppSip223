@@ -40,13 +40,13 @@ namespace ConsoleApp.SipOperations
         /// <returns>true, если звонок успешно инициирован; иначе false</returns>
         public async Task<bool> ExecuteAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine($"Инициация звонка на {_destinationUri}...");
+            
 
             try
             {
                 // Отображаем информацию о параметрах звонка для отладки
-                Console.WriteLine($"  От имени: {_username}");
-                Console.WriteLine($"  Используем медиа-сессию: {_mediaSession.GetType().Name}");
+                
+                
 
                 // Выполняем основной SIP звонок через UserAgent
                 // UserAgent обработает всю логику SIP протокола: создание INVITE, аутентификацию, работу с медиа
@@ -56,21 +56,21 @@ namespace ConsoleApp.SipOperations
                 if (result)
                 {
                     // Успешно: SIP INVITE сообщение отправлено на сервер
-                    Console.WriteLine("  Звонок успешно инициирован!");
-                    Console.WriteLine("  SIP INVITE отправлен");
+                    
+                    
                     return true;
                 }
                 else
                 {
                     // Ошибка: не удалось отправить SIP INVITE (может быть проблемы с сетью или конфигурацией)
-                    Console.WriteLine("  Не удалось инициировать звонок");
+                    
                     return false;
                 }
             }
             catch (Exception ex)
             {
                 // Ловим любые необработанные исключения и логируем их для отладки
-                Console.WriteLine($"  Ошибка при звонке: {ex.Message}");
+                
                 return false;
             }
         }

@@ -36,7 +36,7 @@ namespace ConsoleApp.SipOperations
         /// <returns>true, если регистрация прошла успешно; иначе false</returns>
         public async Task<bool> ExecuteAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine($"Регистрация {_username} на сервере {_server}...");
+            
 
             try
             {
@@ -45,19 +45,19 @@ namespace ConsoleApp.SipOperations
 
                 // Создаем SIP URI для регистрации
                 var sipUri = SIPURI.ParseSIPURI($"sip:{_username}@{_server}");
-                Console.WriteLine($"  SIP URI: {sipUri}");
+                
 
                 // Симуляция проверки доступности сервера
                 await Task.Delay(500, cancellationToken);
 
-                Console.WriteLine($"  Подготовка к регистрации завершена");
-                Console.WriteLine($"  Учетные данные: {_username} (пароль скрыт)");
+                
+                
 
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  Ошибка подготовки регистрации: {ex.Message}");
+                
                 return false;
             }
         }

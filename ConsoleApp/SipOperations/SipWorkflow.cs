@@ -1,4 +1,5 @@
 using ConsoleApp.States;
+using Microsoft.Extensions.Logging;
 
 namespace ConsoleApp.SipOperations
 {
@@ -9,16 +10,18 @@ namespace ConsoleApp.SipOperations
     {
         private readonly SipStateMachine _stateMachine;
         private readonly List<ISipOperation> _operations;
+        private readonly ILogger<SipWorkflow> _logger;
 
         public SipStateMachine StateMachine => _stateMachine;
 
         /// <summary>
         /// Инициализирует новый экземпляр SIP workflow с машиной состояний
         /// </summary>
-        public SipWorkflow()
+        public SipWorkflow(ILogger<SipWorkflow> logger, ILogger<SipStateMachine> stateMachineLogger)
         {
+            _logger = logger;
             // Инициализируем машину состояний для отслеживания этапов звонка
-            _stateMachine = new SipStateMachine();
+            _stateMachine = new SipStateMachine(stateMachineLogger);
             // Создаём список для хранения операций, которые будут выполнены последовательно
             _operations = new List<ISipOperation>();
 
@@ -43,7 +46,7 @@ namespace ConsoleApp.SipOperations
         /// <returns>true, если все операции выполнены успешно; иначе false</returns>
         public async Task<bool> ExecuteWorkflowAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine("Запуск SIP workflow...");
+            _logger.LogInformation("Запуск SIP workflow...");
 
             // Сбрасываем машину состояний в начальное состояние перед началом нового workflow
             _stateMachine.Reset();
@@ -53,7 +56,7 @@ namespace ConsoleApp.SipOperations
                 // Проходим по всем операциям в порядке добавления и выполняем их последовательно
                 foreach (var operation in _operations)
                 {
-                    Console.WriteLine($"\nВыполнение: {operation.OperationName}");
+                    _logger.LogInformation("Выполнение: {OperationName}", operation.OperationName);
 
                     // Обновляем состояние машины состояний в зависимости от типа операции
                     UpdateStateForOperation(operation);
@@ -66,20 +69,20 @@ namespace ConsoleApp.SipOperations
                     {
                         // При ошибке переводим машину состояний в состояние "ошибка" и прекращаем workflow
                         _stateMachine.TransitionTo(SipCallState.Failed);
-                        Console.WriteLine($"Операция {operation.OperationName} завершилась неудачно");
+                        _logger.LogError("Операция {OperationName} завершилась неудачно", operation.OperationName);
                         return false;
                     }
 
-                    Console.WriteLine($"Операция {operation.OperationName} выполнена успешно");
+                    _logger.LogInformation("Операция {OperationName} выполнена успешно", operation.OperationName);
                 }
 
-                Console.WriteLine("\nWorkflow завершен успешно!");
+                _logger.LogInformation("Workflow завершен успешно!");
                 return true;
             }
             catch (Exception ex)
             {
                 _stateMachine.TransitionTo(SipCallState.Failed);
-                Console.WriteLine($"Ошибка в workflow: {ex.Message}");
+                _logger.LogError(ex, "Ошибка в workflow: {Message}", ex.Message);
                 return false;
             }
         }
@@ -108,7 +111,7 @@ namespace ConsoleApp.SipOperations
         /// <param name="newState">Новое состояние</param>
         private void OnStateChanged(SipCallState oldState, SipCallState newState)
         {
-            Console.WriteLine($"{_stateMachine.GetStateDescription(newState)}");
+            _logger.LogInformation("{StateDescription}", _stateMachine.GetStateDescription(newState));
         }
 
         /// <summary>
