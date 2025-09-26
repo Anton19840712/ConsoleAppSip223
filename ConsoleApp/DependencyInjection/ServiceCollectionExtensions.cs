@@ -13,9 +13,12 @@ namespace ConsoleApp.DependencyInjection
     {
         public static IServiceCollection AddApplicationServices(this IServiceCollection services)
         {
-            // Регистрируем Serilog
-            var currentDirectory = Directory.GetCurrentDirectory();
-            var logFileName = Path.Combine(currentDirectory, "Logs", $"sip-app-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}.log");
+            // Регистрируем Serilog - используем путь относительно корня проекта
+            var projectRoot = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(Directory.GetCurrentDirectory())));
+            if (string.IsNullOrEmpty(projectRoot))
+                projectRoot = Directory.GetCurrentDirectory();
+
+            var logFileName = Path.Combine(projectRoot, "Logs", $"sip-app-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}.log");
 
             // Создаем папку для логов если она не существует
             var logsDirectory = Path.GetDirectoryName(logFileName);

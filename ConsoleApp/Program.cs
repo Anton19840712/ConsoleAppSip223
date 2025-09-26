@@ -43,14 +43,32 @@ class SafeSipCaller
 	/// <param name="args">Аргументы командной строки</param>
 	static async Task Main(string[] args)
 	{
-		// Загружаем конфигурацию приложения из appsettings.json
-		LoadConfiguration();
+		try
+		{
+			Console.WriteLine($"=== СТАРТ ПРИЛОЖЕНИЯ {DateTime.Now:HH:mm:ss} ===");
 
-		// Настраиваем DI контейнер
-		ConfigureDependencyInjection();
+			// Загружаем конфигурацию приложения из appsettings.json
+			Console.WriteLine("Загружаем конфигурацию...");
+			LoadConfiguration();
+			Console.WriteLine("Конфигурация загружена.");
 
-		// Получаем сервис логирования
-		_loggingService = _serviceProvider!.GetRequiredService<ILoggingService>();
+			// Настраиваем DI контейнер
+			Console.WriteLine("Настраиваем DI...");
+			ConfigureDependencyInjection();
+			Console.WriteLine("DI настроен.");
+
+			// Получаем сервис логирования
+			Console.WriteLine("Получаем логирование...");
+			_loggingService = _serviceProvider!.GetRequiredService<ILoggingService>();
+			Console.WriteLine("Логирование готово. Переходим к файловому логированию.");
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine($"КРИТИЧЕСКАЯ ОШИБКА ИНИЦИАЛИЗАЦИИ: {ex.Message}");
+			Console.WriteLine($"Stack trace: {ex.StackTrace}");
+			Console.ReadLine();
+			return;
+		}
 
 		_loggingService.LogInfo("=== SIP звонок с WebRTC Audio мостом ===");
 		_loggingService.LogInfo($"Звоним: {_config.SipConfiguration.CallerUsername} → {_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}");
