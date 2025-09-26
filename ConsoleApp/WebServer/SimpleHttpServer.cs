@@ -172,20 +172,80 @@ namespace ConsoleApp.WebServer
     <meta name='viewport' content='width=device-width, initial-scale=1.0'>
     <title>SIP Audio Bridge</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
-        .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; text-align: center; }
-        .status { padding: 10px; margin: 10px 0; border-radius: 5px; text-align: center; }
-        .status.ready { background: #e7f3ff; color: #0066cc; }
-        .status.recording { background: #fff3cd; color: #856404; }
-        .status.error { background: #f8d7da; color: #721c24; }
-        button {
-            background: #007bff; color: white; border: none; padding: 15px 30px;
-            border-radius: 5px; font-size: 16px; cursor: pointer; width: 100%; margin: 10px 0;
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0; padding: 0;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
-        button:hover { background: #0056b3; }
-        button:disabled { background: #6c757d; cursor: not-allowed; }
-        .info { background: #d1ecf1; padding: 15px; border-radius: 5px; margin: 10px 0; }
+        .container {
+            background: #ffffff;
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+        }
+        h1 {
+            color: #4a5568;
+            margin: 0 0 30px 0;
+            font-size: 24px;
+            font-weight: 600;
+        }
+        .status {
+            padding: 12px 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .status.ready {
+            background: #e6fffa;
+            color: #2d7065;
+            border: 1px solid #b2f5ea;
+        }
+        .status.recording {
+            background: #fffbeb;
+            color: #92400e;
+            border: 1px solid #fed7aa;
+        }
+        .status.error {
+            background: #fef2f2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+        }
+        button {
+            background: #718096;
+            color: white;
+            border: none;
+            padding: 14px 24px;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            width: 100%;
+            margin: 8px 0;
+            transition: all 0.2s ease;
+        }
+        button:hover:not(:disabled) {
+            background: #4a5568;
+            transform: translateY(-1px);
+        }
+        button:disabled {
+            background: #a0aec0;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .recording-btn {
+            background: #e53e3e;
+        }
+        .recording-btn:hover:not(:disabled) {
+            background: #c53030;
+        }
     </style>
 </head>
 <body>
@@ -193,20 +253,11 @@ namespace ConsoleApp.WebServer
         <h1>SIP Audio Bridge</h1>
 
         <div id='status' class='status ready'>
-            Готов к захвату аудио из микрофона
-        </div>
-
-        <div class='info'>
-            <strong>Как это работает:</strong><br>
-            1. Нажмите ""Начать запись"" для захвата микрофона<br>
-            2. Аудио будет передано в C# SIP приложение<br>
-            3. SIP приложение перенаправит звук в голосовой поток
+            Готов к работе
         </div>
 
         <button id='startBtn' onclick='startRecording()'>Начать запись</button>
-        <button id='stopBtn' onclick='stopRecording()' disabled>⏹️ Остановить запись</button>
-
-        <div id='log' style='margin-top: 20px; padding: 10px; background: #f8f9fa; border-radius: 5px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto;'></div>
+        <button id='stopBtn' onclick='stopRecording()' disabled class='recording-btn'>Остановить запись</button>
     </div>
 
     <script>
@@ -217,26 +268,21 @@ namespace ConsoleApp.WebServer
         let isRecording = false;
         let audioBuffer = [];
 
+        // Упрощенная функция логирования - только отправляем на сервер
         function log(message, level = 'info') {
-            const logDiv = document.getElementById('log');
-            const timestamp = new Date().toLocaleTimeString();
-            logDiv.innerHTML += `<div>[${timestamp}] ${message}</div>`;
-            logDiv.scrollTop = logDiv.scrollHeight;
-
-            // Отправляем лог на сервер
             sendLogToServer(message, level);
         }
 
         function logError(message) {
-            log(message, 'error');
+            sendLogToServer(message, 'error');
         }
 
         function logWarning(message) {
-            log(message, 'warning');
+            sendLogToServer(message, 'warning');
         }
 
         function logDebug(message) {
-            log(message, 'debug');
+            sendLogToServer(message, 'debug');
         }
 
         async function sendLogToServer(message, level) {
@@ -377,7 +423,7 @@ namespace ConsoleApp.WebServer
                 }
 
                 updateUI();
-                log('⏹️ Запись остановлена');
+                log('Запись остановлена');
             }
         }
 
@@ -428,9 +474,9 @@ namespace ConsoleApp.WebServer
             stopBtn.disabled = !isRecording;
 
             if (isRecording) {
-                updateStatus('recording', 'Идет запись... Говорите в микрофон');
+                updateStatus('recording', 'Идет запись...');
             } else {
-                updateStatus('ready', 'Готов к захвату аудио из микрофона');
+                updateStatus('ready', 'Готов к работе');
             }
         }
 
