@@ -1,5 +1,6 @@
 using SIPSorceryMedia.Abstractions;
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 
 namespace ConsoleApp.WebServer
 {
@@ -9,9 +10,15 @@ namespace ConsoleApp.WebServer
     public class BrowserAudioSource : IAudioSource
     {
         private readonly ConcurrentQueue<byte[]> _audioQueue = new();
+        private readonly ILogger<BrowserAudioSource> _logger;
         private bool _isStarted = false;
         private bool _isPaused = false;
         private Timer? _sendTimer;
+
+        public BrowserAudioSource(ILogger<BrowserAudioSource> logger)
+        {
+            _logger = logger;
+        }
 
         public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
         public event SourceErrorDelegate? OnAudioSourceError;
@@ -41,12 +48,12 @@ namespace ConsoleApp.WebServer
             if (audioFormat.FormatID == (int)SDPWellKnownMediaFormatsEnum.PCMA)
             {
                 _useAlaw = true;
-                Console.WriteLine($"🎵 BrowserAudioSource: установлен формат G.711 A-law");
+                _logger.LogInformation("BrowserAudioSource: установлен формат G.711 A-law");
             }
             else
             {
                 _useAlaw = false;
-                Console.WriteLine($"🎵 BrowserAudioSource: установлен формат G.711 μ-law");
+                _logger.LogInformation("BrowserAudioSource: установлен формат G.711 μ-law");
             }
         }
 
@@ -59,7 +66,7 @@ namespace ConsoleApp.WebServer
 
             _isStarted = true;
             _isPaused = false;
-            Console.WriteLine("🎤 BrowserAudioSource: запуск передачи аудио");
+            _logger.LogInformation("BrowserAudioSource: запуск передачи аудио");
 
             // Отправляем аудио данные каждые 20ms (стандартный интервал для G.711)
             _sendTimer = new Timer(SendAudioFrame, null, 0, 20);
@@ -78,7 +85,7 @@ namespace ConsoleApp.WebServer
             _sendTimer?.Dispose();
             _sendTimer = null;
 
-            Console.WriteLine("⏹️ BrowserAudioSource: остановка передачи аудио");
+            _logger.LogInformation("BrowserAudioSource: остановка передачи аудио");
         }
 
         /// <summary>
@@ -87,7 +94,7 @@ namespace ConsoleApp.WebServer
         public Task CloseAudio()
         {
             StopAudio();
-            Console.WriteLine("🔒 BrowserAudioSource: закрытие источника аудио");
+            _logger.LogInformation("BrowserAudioSource: закрытие источника аудио");
             return Task.CompletedTask;
         }
 
@@ -97,7 +104,7 @@ namespace ConsoleApp.WebServer
         public Task PauseAudio()
         {
             _isPaused = true;
-            Console.WriteLine("⏸️ BrowserAudioSource: пауза передачи аудио");
+            _logger.LogInformation("BrowserAudioSource: пауза передачи аудио");
             return Task.CompletedTask;
         }
 
@@ -107,7 +114,7 @@ namespace ConsoleApp.WebServer
         public Task ResumeAudio()
         {
             _isPaused = false;
-            Console.WriteLine("▶️ BrowserAudioSource: возобновление передачи аудио");
+            _logger.LogInformation("BrowserAudioSource: возобновление передачи аудио");
             return Task.CompletedTask;
         }
 
@@ -133,7 +140,7 @@ namespace ConsoleApp.WebServer
         public void RestrictFormats(Func<AudioFormat, bool> filter)
         {
             // Для упрощения не ограничиваем форматы
-            Console.WriteLine("🔧 BrowserAudioSource: ограничение форматов (не реализовано)");
+            _logger.LogDebug("BrowserAudioSource: ограничение форматов (не реализовано)");
         }
 
         /// <summary>
@@ -142,7 +149,7 @@ namespace ConsoleApp.WebServer
         public void ExternalAudioSourceRawSample(AudioSamplingRatesEnum samplingRate, uint durationMilliseconds, short[] samples)
         {
             // Для упрощения не используем внешние RAW сэмплы
-            Console.WriteLine($"🎵 BrowserAudioSource: внешний RAW сэмпл {samples.Length} семплов @ {samplingRate}");
+            _logger.LogDebug("BrowserAudioSource: внешний RAW сэмпл {SamplesLength} семплов @ {SamplingRate}", samples.Length, samplingRate);
         }
 
         /// <summary>
@@ -153,7 +160,7 @@ namespace ConsoleApp.WebServer
         {
             if (!_isStarted)
             {
-                Console.WriteLine("⏸️ BrowserAudioSource не запущен - аудио пропущено");
+                _logger.LogWarning("BrowserAudioSource не запущен - аудио пропущено");
                 return;
             }
 
@@ -161,7 +168,7 @@ namespace ConsoleApp.WebServer
             var mulawData = ConvertToPCM(audioData);
 
             _audioQueue.Enqueue(mulawData);
-            Console.WriteLine($"📦 BrowserAudioSource: добавлено {audioData.Length} байт PCM → {mulawData.Length} байт μ-law (очередь: {_audioQueue.Count})");
+            _logger.LogDebug("BrowserAudioSource: добавлено {InputLength} байт PCM → {OutputLength} байт μ-law (очередь: {QueueCount})", audioData.Length, mulawData.Length, _audioQueue.Count);
         }
 
         private readonly Queue<byte> _continuousAudioBuffer = new();
@@ -223,7 +230,7 @@ namespace ConsoleApp.WebServer
             // Логируем состояние буфера
             if (_continuousAudioBuffer.Count % 500 == 0 || _continuousAudioBuffer.Count > 2000 || bytesRead == 0)
             {
-                Console.WriteLine($"📡 RTP: {bytesRead}/{samplesPerFrame}, буфер: {_continuousAudioBuffer.Count}, статус: {(bytesRead > 0 ? "АУДИО" : "ТИШИНА")}");
+                _logger.LogDebug("RTP: {BytesRead}/{SamplesPerFrame}, буфер: {BufferCount}, статус: {Status}", bytesRead, samplesPerFrame, _continuousAudioBuffer.Count, (bytesRead > 0 ? "АУДИО" : "ТИШИНА"));
             }
         }
 
@@ -232,12 +239,12 @@ namespace ConsoleApp.WebServer
         /// </summary>
         private byte[] ConvertToPCM(byte[] pcmData)
         {
-            Console.WriteLine($"🔄 Конвертация PCM: получено {pcmData.Length} байт");
+            _logger.LogDebug("Конвертация PCM: получено {Length} байт", pcmData.Length);
 
             // Проверяем, что данные кратны 2 (16-bit samples)
             if (pcmData.Length % 2 != 0)
             {
-                Console.WriteLine("⚠️ Некорректный размер PCM данных, добавляем padding");
+                _logger.LogWarning("Некорректный размер PCM данных, добавляем padding");
                 Array.Resize(ref pcmData, pcmData.Length + 1);
                 pcmData[pcmData.Length - 1] = 0;
             }
@@ -246,7 +253,7 @@ namespace ConsoleApp.WebServer
             int sampleCount = pcmData.Length / 2;
             var mulawData = new byte[sampleCount];
 
-            Console.WriteLine($"🔄 Обрабатываем {sampleCount} PCM сэмплов → G.711 μ-law");
+            _logger.LogDebug("Обрабатываем {SampleCount} PCM сэмплов → G.711 μ-law", sampleCount);
 
             for (int i = 0; i < sampleCount; i++)
             {
@@ -257,14 +264,14 @@ namespace ConsoleApp.WebServer
                 // Дополнительная проверка и отладка первых сэмплов
                 if (i < 5)
                 {
-                    Console.WriteLine($"  Сэмпл {i}: байты [{pcmData[byteIndex]:X2} {pcmData[byteIndex + 1]:X2}] → Int16: {sample}");
+                    _logger.LogTrace("Сэмпл {Index}: байты [{Byte1:X2} {Byte2:X2}] → Int16: {Sample}", i, pcmData[byteIndex], pcmData[byteIndex + 1], sample);
                 }
 
                 // Конвертируем в G.711 (μ-law или A-law автоматически)
                 mulawData[i] = LinearToG711(sample);
             }
 
-            Console.WriteLine($"✅ Конвертация завершена: {sampleCount} μ-law байт");
+            _logger.LogDebug("Конвертация завершена: {SampleCount} μ-law байт", sampleCount);
             return mulawData;
         }
 

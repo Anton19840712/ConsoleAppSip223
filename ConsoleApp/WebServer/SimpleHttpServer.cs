@@ -1,5 +1,8 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using ConsoleApp.Models;
 
 namespace ConsoleApp.WebServer
 {
@@ -8,9 +11,11 @@ namespace ConsoleApp.WebServer
         private HttpListener _listener;
         private bool _isRunning = false;
         private readonly string _url;
+        private readonly ILogger<SimpleHttpServer> _logger;
 
-        public SimpleHttpServer(string url = "http://localhost:8080/")
+        public SimpleHttpServer(ILogger<SimpleHttpServer> logger, string url = "http://localhost:8080/")
         {
+            _logger = logger;
             _url = url;
             _listener = new HttpListener();
             _listener.Prefixes.Add(_url);
@@ -20,8 +25,8 @@ namespace ConsoleApp.WebServer
         {
             _listener.Start();
             _isRunning = true;
-            Console.WriteLine($"HTTP сервер запущен на {_url}");
-            Console.WriteLine($"Откройте браузер: {_url}");
+            _logger.LogInformation("HTTP сервер запущен на {Url}", _url);
+            _logger.LogInformation("Откройте браузер: {Url}", _url);
 
             while (_isRunning)
             {
@@ -32,7 +37,7 @@ namespace ConsoleApp.WebServer
                 }
                 catch (Exception ex) when (_isRunning)
                 {
-                    Console.WriteLine($"Ошибка HTTP сервера: {ex.Message}");
+                    _logger.LogError(ex, "Ошибка HTTP сервера");
                 }
             }
         }
@@ -59,6 +64,11 @@ namespace ConsoleApp.WebServer
                     // Получение аудио данных из браузера
                     await ProcessAudioData(request, response);
                 }
+                else if (request.Url?.AbsolutePath == "/log" && request.HttpMethod == "POST")
+                {
+                    // Получение логов из браузера
+                    await ProcessBrowserLog(request, response);
+                }
                 else
                 {
                     // 404 Not Found
@@ -70,7 +80,7 @@ namespace ConsoleApp.WebServer
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ошибка обработки запроса: {ex.Message}");
+                _logger.LogError(ex, "Ошибка обработки запроса");
                 response.StatusCode = 500;
             }
             finally
@@ -84,7 +94,7 @@ namespace ConsoleApp.WebServer
             using var reader = new BinaryReader(request.InputStream);
             var audioData = reader.ReadBytes((int)request.ContentLength64);
 
-            Console.WriteLine($"🎤 Получены аудио данные: {audioData.Length} байт");
+            _logger.LogDebug("Получены аудио данные: {Length} байт", audioData.Length);
 
             // Здесь будем интегрировать с SIP медиа-сессией
             OnAudioDataReceived?.Invoke(audioData);
@@ -99,11 +109,58 @@ namespace ConsoleApp.WebServer
 
         public event Action<byte[]>? OnAudioDataReceived;
 
+        private async Task ProcessBrowserLog(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            try
+            {
+                using var reader = new StreamReader(request.InputStream);
+                var jsonContent = await reader.ReadToEndAsync();
+
+                var logEntry = JsonSerializer.Deserialize<BrowserLogEntry>(jsonContent);
+
+                if (logEntry != null)
+                {
+                    // Логируем в зависимости от уровня
+                    var browserMessage = $"[BROWSER] {logEntry.Message}";
+
+                    switch (logEntry.Level.ToLower())
+                    {
+                        case "error":
+                            _logger.LogError(browserMessage);
+                            break;
+                        case "warning":
+                        case "warn":
+                            _logger.LogWarning(browserMessage);
+                            break;
+                        case "debug":
+                            _logger.LogDebug(browserMessage);
+                            break;
+                        case "info":
+                        default:
+                            _logger.LogInformation(browserMessage);
+                            break;
+                    }
+                }
+
+                // Отправляем успешный ответ
+                response.StatusCode = 200;
+                response.ContentType = "application/json";
+                var successResponse = Encoding.UTF8.GetBytes("{\"status\":\"ok\"}");
+                response.ContentLength64 = successResponse.Length;
+                await response.OutputStream.WriteAsync(successResponse);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ошибка обработки браузерного лога");
+                response.StatusCode = 500;
+            }
+        }
+
         public void Stop()
         {
             _isRunning = false;
             _listener?.Stop();
-            Console.WriteLine("HTTP сервер остановлен");
+            _logger.LogInformation("HTTP сервер остановлен");
         }
 
         private string GetMainPageHtml()
@@ -133,7 +190,7 @@ namespace ConsoleApp.WebServer
 </head>
 <body>
     <div class='container'>
-        <h1>🎙️ SIP Audio Bridge</h1>
+        <h1>SIP Audio Bridge</h1>
 
         <div id='status' class='status ready'>
             Готов к захвату аудио из микрофона
@@ -146,7 +203,7 @@ namespace ConsoleApp.WebServer
             3. SIP приложение перенаправит звук в голосовой поток
         </div>
 
-        <button id='startBtn' onclick='startRecording()'>🎤 Начать запись</button>
+        <button id='startBtn' onclick='startRecording()'>Начать запись</button>
         <button id='stopBtn' onclick='stopRecording()' disabled>⏹️ Остановить запись</button>
 
         <div id='log' style='margin-top: 20px; padding: 10px; background: #f8f9fa; border-radius: 5px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto;'></div>
@@ -160,11 +217,49 @@ namespace ConsoleApp.WebServer
         let isRecording = false;
         let audioBuffer = [];
 
-        function log(message) {
+        function log(message, level = 'info') {
             const logDiv = document.getElementById('log');
             const timestamp = new Date().toLocaleTimeString();
             logDiv.innerHTML += `<div>[${timestamp}] ${message}</div>`;
             logDiv.scrollTop = logDiv.scrollHeight;
+
+            // Отправляем лог на сервер
+            sendLogToServer(message, level);
+        }
+
+        function logError(message) {
+            log(message, 'error');
+        }
+
+        function logWarning(message) {
+            log(message, 'warning');
+        }
+
+        function logDebug(message) {
+            log(message, 'debug');
+        }
+
+        async function sendLogToServer(message, level) {
+            try {
+                const logEntry = {
+                    level: level,
+                    message: message,
+                    timestamp: new Date().toISOString(),
+                    userAgent: navigator.userAgent,
+                    url: window.location.href
+                };
+
+                await fetch('/log', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(logEntry)
+                });
+            } catch (error) {
+                // Не логируем ошибку отправки лога, чтобы избежать бесконечной рекурсии
+                console.error('Ошибка отправки лога на сервер:', error);
+            }
         }
 
         async function startRecording() {
@@ -179,14 +274,14 @@ namespace ConsoleApp.WebServer
                     }
                 });
 
-                log('✅ Доступ к микрофону получен');
+                log('Доступ к микрофону получен');
 
                 // Создаем Web Audio API контекст для получения RAW PCM
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
                 // Проверяем реальную частоту дискретизации
                 console.log('AudioContext sample rate:', audioContext.sampleRate);
-                log(`🔊 Реальная частота: ${audioContext.sampleRate} Hz (нужно 8000 Hz)`);
+                log(`Реальная частота: ${audioContext.sampleRate} Hz (нужно 8000 Hz)`);
 
                 // Создаем узлы аудио графа
                 microphone = audioContext.createMediaStreamSource(stream);
@@ -252,10 +347,10 @@ namespace ConsoleApp.WebServer
 
                 isRecording = true;
                 updateUI();
-                log('🎙️ Запись началась (Web Audio API, PCM 16-bit, 8kHz)');
+                log('Запись началась (Web Audio API, PCM 16-bit, 8kHz)');
 
             } catch (error) {
-                log(`❌ Ошибка: ${error.message}`);
+                logError(`Ошибка: ${error.message}`);
                 updateStatus('error', `Ошибка доступа к микрофону: ${error.message}`);
             }
         }
@@ -304,7 +399,7 @@ namespace ConsoleApp.WebServer
                 // Конвертируем в bytes для отправки
                 const pcmBytes = new Uint8Array(combinedPCM.buffer);
 
-                log(`📦 Отправляем PCM: ${totalSamples} сэмплов, ${pcmBytes.length} байт`);
+                log(`Отправляем PCM: ${totalSamples} сэмплов, ${pcmBytes.length} байт`);
 
                 const response = await fetch('/audio', {
                     method: 'POST',
@@ -316,12 +411,12 @@ namespace ConsoleApp.WebServer
 
                 if (response.ok) {
                     const result = await response.json();
-                    log(`✅ PCM отправлен успешно`);
+                    log(`PCM отправлен успешно`);
                 } else {
-                    log(`❌ Ошибка отправки: ${response.status}`);
+                    logError(`Ошибка отправки: ${response.status}`);
                 }
             } catch (error) {
-                log(`❌ Ошибка сети: ${error.message}`);
+                logError(`Ошибка сети: ${error.message}`);
             }
         }
 
@@ -333,7 +428,7 @@ namespace ConsoleApp.WebServer
             stopBtn.disabled = !isRecording;
 
             if (isRecording) {
-                updateStatus('recording', '🎙️ Идет запись... Говорите в микрофон');
+                updateStatus('recording', 'Идет запись... Говорите в микрофон');
             } else {
                 updateStatus('ready', 'Готов к захвату аудио из микрофона');
             }
@@ -345,7 +440,7 @@ namespace ConsoleApp.WebServer
             status.textContent = message;
         }
 
-        log('🚀 Страница загружена. Готов к работе!');
+        log('Страница загружена. Готов к работе!');
     </script>
 </body>
 </html>";
