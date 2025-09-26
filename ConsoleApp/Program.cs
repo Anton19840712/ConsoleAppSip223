@@ -232,6 +232,21 @@ class SafeSipCaller
 			};
 			_mediaSession = new VoIPMediaSession(mediaEndPoints);
 
+			// Добавляем bandwidth control через SIPSorcery API
+			if (_mediaSession.AudioLocalTrack != null)
+			{
+				// Устанавливаем TIAS bandwidth (Transport Independent Application Specific)
+				_mediaSession.AudioLocalTrack.MaximumBandwidth = 64000; // 64000 bps = 64 kbps
+				_loggingService.LogInfo("✓ Установлен bandwidth control: b=TIAS:64000 (64 kbps)");
+			}
+			else
+			{
+				_loggingService.LogWarning("AudioLocalTrack недоступен, bandwidth control пропущен");
+			}
+
+			// TODO: Добавить RTCP через правильный API SIPSorcery
+			_loggingService.LogInfo("TODO: Добавить RTCP для мониторинга качества");
+
 			_loggingService.LogInfo("Медиа-сессия создана с BrowserAudioSource!");
 			_loggingService.LogInfo("Теперь аудио из браузера будет передаваться в SIP RTP поток");
 
@@ -241,6 +256,9 @@ class SafeSipCaller
 		_loggingService.LogInfo($"Шаг 3: Создание User Agent (таймаут {_config.CallSettings.UserAgentTimeoutMs / 1000}с)...");
 		await RunWithTimeout(async () => {
 			_userAgent = new SIPUserAgent(_sipTransport, null);
+
+			// TODO: Добавить session timers через правильный API SIPSorcery
+			_loggingService.LogInfo("TODO: Добавить session timers для стабильности");
 
 			// Настройка Chain of Responsibility для событий
 			SetupEventChain();
