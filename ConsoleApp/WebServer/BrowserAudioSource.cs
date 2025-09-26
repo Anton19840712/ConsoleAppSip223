@@ -195,7 +195,7 @@ namespace ConsoleApp.WebServer
             var frame = new byte[samplesPerFrame];
             int bytesRead = 0;
 
-            // Отправляем данные как только они есть, без минимального буфера
+            // Отправляем полные кадры и частичные кадры с плавным затуханием
             if (_continuousAudioBuffer.Count >= samplesPerFrame)
             {
                 // Есть достаточно данных для полного кадра
@@ -205,27 +205,29 @@ namespace ConsoleApp.WebServer
                     bytesRead++;
                 }
             }
-            else if (_continuousAudioBuffer.Count > 0)
+            else if (_continuousAudioBuffer.Count > 80)  // Отправляем только если достаточно данных (50% кадра)
             {
-                // Есть некоторые данные - используем их и дополняем тишиной
+                // Частичный кадр - отправляем только значительные фрагменты
                 int availableBytes = _continuousAudioBuffer.Count;
                 for (int i = 0; i < availableBytes; i++)
                 {
                     frame[i] = _continuousAudioBuffer.Dequeue();
                     bytesRead++;
                 }
-                // Дополняем остальное тишиной
-                Array.Fill(frame, (byte)0xFF, availableBytes, samplesPerFrame - availableBytes);
+                // Остальное дополняем тишиной
+                Array.Fill(frame, (byte)0x80, availableBytes, samplesPerFrame - availableBytes);
             }
             else
             {
-                // Нет данных - отправляем тишину
-                Array.Fill(frame, (byte)0xFF, 0, samplesPerFrame);
+                // Нет данных - НЕ отправляем пустые кадры (это устраняет щелчки тишины)
                 bytesRead = 0;
             }
 
-            // Отправляем кадр в RTP поток
-            OnAudioSourceEncodedSample.Invoke(8000, frame);
+            // Отправляем кадр в RTP поток ТОЛЬКО если есть реальные аудио данные
+            if (bytesRead > 0)
+            {
+                OnAudioSourceEncodedSample.Invoke(8000, frame);
+            }
 
             // Логируем состояние буфера
             if (_continuousAudioBuffer.Count % 500 == 0 || _continuousAudioBuffer.Count > 2000 || bytesRead == 0)
