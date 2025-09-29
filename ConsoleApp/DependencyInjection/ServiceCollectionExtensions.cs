@@ -4,8 +4,6 @@ using ConsoleApp.SipOperations;
 using ConsoleApp.States;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Serilog;
-using Serilog.Extensions.Logging;
 
 namespace ConsoleApp.DependencyInjection
 {
@@ -13,31 +11,24 @@ namespace ConsoleApp.DependencyInjection
     {
         public static IServiceCollection AddApplicationServices(this IServiceCollection services)
         {
-            // Регистрируем Serilog - используем путь относительно корня проекта
-            var projectRoot = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(Directory.GetCurrentDirectory())));
-            if (string.IsNullOrEmpty(projectRoot))
-                projectRoot = Directory.GetCurrentDirectory();
-
-            var logFileName = Path.Combine(projectRoot, "Logs", $"sip-app-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}.log");
-
-            // Создаем папку для логов если она не существует
-            var logsDirectory = Path.GetDirectoryName(logFileName);
-            if (!string.IsNullOrEmpty(logsDirectory))
+            // Настраиваем встроенный логгер .NET с записью в файл
+            services.AddLogging(builder =>
             {
-                Directory.CreateDirectory(logsDirectory);
-            }
+                builder.SetMinimumLevel(LogLevel.Debug);
 
-            Log.Logger = new LoggerConfiguration()
-                .MinimumLevel.Debug()
-                .WriteTo.File(
-                    logFileName,
-                    rollingInterval: RollingInterval.Infinite,
-                    outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] [{Level:u3}] {Message:lj}{NewLine}{Exception}",
-                    flushToDiskInterval: TimeSpan.FromSeconds(1))
-                .CreateLogger();
+                // Определяем путь к файлу логов
+                var projectRoot = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(Directory.GetCurrentDirectory())));
+                if (string.IsNullOrEmpty(projectRoot))
+                    projectRoot = Directory.GetCurrentDirectory();
 
-            // Регистрируем ILoggerFactory с Serilog
-            services.AddSingleton<ILoggerFactory>(provider => new SerilogLoggerFactory(Log.Logger));
+                var logFileName = Path.Combine(projectRoot, "Logs", $"sip-app-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}.log");
+
+                // Добавляем файловый логгер
+                builder.AddProvider(new ConsoleApp.Services.FileLoggerProvider(logFileName));
+
+                // Также можно оставить консольный логгер для отладки (по желанию)
+                // builder.AddConsole();
+            });
 
             // Регистрируем наш сервис логирования
             services.AddSingleton<ILoggingService, LoggingService>();

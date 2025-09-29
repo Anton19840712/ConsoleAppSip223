@@ -10,10 +10,10 @@ using ConsoleApp.Configuration;
 using ConsoleApp.WebServer;
 using ConsoleApp.Services;
 using ConsoleApp.DependencyInjection;
+using ConsoleApp.States;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Serilog;
 
 class SafeSipCaller
 {
@@ -45,22 +45,9 @@ class SafeSipCaller
 	{
 		try
 		{
-			Console.WriteLine($"=== СТАРТ ПРИЛОЖЕНИЯ {DateTime.Now:HH:mm:ss} ===");
-
-			// Загружаем конфигурацию приложения из appsettings.json
-			Console.WriteLine("Загружаем конфигурацию...");
 			LoadConfiguration();
-			Console.WriteLine("Конфигурация загружена.");
-
-			// Настраиваем DI контейнер
-			Console.WriteLine("Настраиваем DI...");
 			ConfigureDependencyInjection();
-			Console.WriteLine("DI настроен.");
-
-			// Получаем сервис логирования
-			Console.WriteLine("Получаем логирование...");
 			_loggingService = _serviceProvider!.GetRequiredService<ILoggingService>();
-			Console.WriteLine("Логирование готово. Переходим к файловому логированию.");
 		}
 		catch (Exception ex)
 		{
@@ -70,15 +57,7 @@ class SafeSipCaller
 			return;
 		}
 
-		_loggingService.LogInfo("=== SIP звонок с WebRTC Audio мостом ===");
-		_loggingService.LogInfo($"Звоним: {_config.SipConfiguration.CallerUsername} → {_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}");
-		_loggingService.LogInfo("Аудио: Браузер (микрофон) → WebSocket → SIP RTP");
-		_loggingService.LogInfo("==========================================");
-
-		// Принудительный выход через заданное время (защита от зависания)
-		// Используем Timer для гарантированного завершения программы
-		_forceExitTimer = new Timer(ForceExit, null, _config.CallSettings.ForceExitTimeoutMs, Timeout.Infinite);
-
+		
 		try
 		{
 			_loggingService.LogInfo("Сеть работает (проверено в предыдущем тесте)");
@@ -117,7 +96,6 @@ class SafeSipCaller
 
 			// Освобождаем ресурсы DI
 			_serviceProvider?.Dispose();
-			Log.CloseAndFlush();
 		}
 	}
 
@@ -150,6 +128,38 @@ class SafeSipCaller
 				// Здесь будем интегрировать с SIP медиа-сессией
 				ProcessBrowserAudio(audioData);
 			};
+
+			// Подписываемся на запросы звонков из браузера
+			_webServer.OnCallRequested += (action) =>
+			{
+				_loggingService!.LogInfo($"Получен запрос звонка из браузера: {action}");
+				ProcessBrowserCallRequest(action);
+			};
+
+			// Устанавливаем провайдер статуса регистрации
+			_webServer.SetRegistrationStatusProvider(() =>
+			{
+				if (_workflow?.StateMachine != null)
+				{
+					var currentState = _workflow.StateMachine.CurrentState;
+					var isRegistered = currentState == SipCallState.Registered;
+					var description = _workflow.StateMachine.GetStateDescription(currentState);
+
+					return new {
+						isRegistered = isRegistered,
+						currentState = currentState.ToString(),
+						description = description
+					};
+				}
+				else
+				{
+					return new {
+						isRegistered = false,
+						currentState = "Unknown",
+						description = "Workflow не инициализирован"
+					};
+				}
+			});
 
 			// Запускаем сервер в фоновом режиме
 			_ = Task.Run(() => _webServer.StartAsync());
@@ -204,6 +214,66 @@ class SafeSipCaller
 		catch (Exception ex)
 		{
 			_loggingService!.LogError($"Ошибка обработки браузерного аудио: {ex.Message}", ex);
+		}
+	}
+
+	/// <summary>
+	/// Обрабатывает запросы звонков из браузера
+	/// </summary>
+	/// <param name="action">Действие: "start" или "hangup"</param>
+	private static void ProcessBrowserCallRequest(string action)
+	{
+		try
+		{
+			switch (action.ToLower())
+			{
+				case "start":
+					_loggingService!.LogInfo("Инициируем звонок по запросу из браузера...");
+					if (_userAgent != null && _mediaSession != null && !_userAgent.IsCallActive)
+					{
+						string uri = $"sip:{_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}";
+
+						// Выполняем звонок асинхронно
+						_ = Task.Run(async () =>
+						{
+							try
+							{
+								await _userAgent.Call(uri, _config.SipConfiguration.CallerUsername, _config.SipConfiguration.CallerPassword, _mediaSession);
+								_loggingService.LogInfo($"Звонок успешно инициирован на {uri}");
+							}
+							catch (Exception ex)
+							{
+								_loggingService.LogError($"Ошибка при звонке: {ex.Message}");
+							}
+						});
+					}
+					else
+					{
+						_loggingService!.LogWarning("Звонок уже активен или система не готова");
+					}
+					break;
+
+				case "hangup":
+					_loggingService!.LogInfo("Завершаем звонок по запросу из браузера...");
+					if (_userAgent != null && _userAgent.IsCallActive)
+					{
+						_userAgent.Hangup();
+						_loggingService.LogInfo("Звонок завершен");
+					}
+					else
+					{
+						_loggingService.LogWarning("Активный звонок не найден");
+					}
+					break;
+
+				default:
+					_loggingService!.LogWarning($"Неизвестное действие звонка: {action}");
+					break;
+			}
+		}
+		catch (Exception ex)
+		{
+			_loggingService!.LogError($"Ошибка обработки запроса звонка: {ex.Message}", ex);
 		}
 	}
 
@@ -303,7 +373,7 @@ class SafeSipCaller
 			_loggingService.LogInfo("User Agent создан и настроен");
 		}, _config.CallSettings.UserAgentTimeoutMs, cancellationToken);
 
-		_loggingService.LogInfo("Шаг 4: Выполнение SIP Workflow (регистрация + звонок)...");
+		_loggingService.LogInfo("Шаг 4: Выполнение SIP Workflow (только регистрация)...");
 		await RunWithTimeout(async () => {
 			if (_workflow != null)
 			{
@@ -312,7 +382,7 @@ class SafeSipCaller
 
 				if (workflowResult)
 				{
-					_loggingService.LogInfo("Workflow выполнен успешно!");
+					_loggingService.LogInfo("Workflow выполнен успешно! Регистрация завершена.");
 					_loggingService.LogInfo("Текущее состояние: " + _workflow.StateMachine.GetStateDescription(_workflow.StateMachine.CurrentState));
 				}
 				else
@@ -326,88 +396,66 @@ class SafeSipCaller
 			}
 		}, _config.CallSettings.CallTimeoutMs, cancellationToken);
 
-		_loggingService.LogInfo($"Шаг 5: Ожидание ответа от {_config.SipConfiguration.DestinationUser} (таймаут {_config.CallSettings.WaitForAnswerTimeoutMs / 1000}с)...");
-		_loggingService.LogInfo($"Сейчас {_config.SipConfiguration.DestinationUser} должен увидеть входящий звонок от {_config.SipConfiguration.CallerUsername}");
-		_loggingService.LogInfo("Команды: 'h' - завершить звонок, 'q' - выйти");
+		_loggingService.LogInfo("Шаг 5: Готов к работе! Веб-сервер запущен на http://localhost:8080/");
+		_loggingService.LogInfo("Откройте браузер и нажмите кнопку для совершения звонка");
+		_loggingService.LogInfo("Команды: 'q' - выйти из программы");
 
-		// Ждем соединения или команд пользователя
-		var startTime = DateTime.Now;
-		while (!cancellationToken.IsCancellationRequested && (DateTime.Now - startTime).TotalSeconds < _config.CallSettings.WaitForAnswerTimeoutMs / 1000.0)
+		// Ждем команд пользователя - приложение работает до команды выхода
+		while (!cancellationToken.IsCancellationRequested)
 		{
 			if (Console.KeyAvailable)
 			{
 				var key = Console.ReadKey(true);
 				if (key.KeyChar == 'h' || key.KeyChar == 'H')
 				{
-					_loggingService.LogInfo("Завершаем звонок по команде пользователя");
+					_loggingService.LogInfo("Завершаем активный звонок по команде пользователя");
 					if (_userAgent.IsCallActive)
 					{
 						_userAgent.Hangup();
 					}
-					break;
 				}
 				else if (key.KeyChar == 'q' || key.KeyChar == 'Q')
 				{
 					_loggingService.LogInfo("Выход по команде пользователя");
 					break;
 				}
-			}
-
-			if (_callActive)
-			{
-				_loggingService.LogInfo("ЗВОНОК АКТИВЕН! romaous ответил!");
-				_loggingService.LogInfo("Теперь можно разговаривать (медиа соединение установлено)");
-				_loggingService.LogInfo("Даю 30 секунд на разговор, потом автоматически завершу");
-				_loggingService.LogInfo("Или нажмите 'h' чтобы завершить раньше");
-
-				// Даем время на разговор
-				for (int i = 0; i < 30 && _callActive && !cancellationToken.IsCancellationRequested; i++)
+				else if (key.KeyChar == 'c' || key.KeyChar == 'C')
 				{
-					if (Console.KeyAvailable)
+					_loggingService.LogInfo("Инициируем звонок по команде пользователя...");
+					if (_userAgent != null && _mediaSession != null && !_userAgent.IsCallActive)
 					{
-						var key = Console.ReadKey(true);
-						if (key.KeyChar == 'h' || key.KeyChar == 'H')
+						string uri = $"sip:{_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}";
+						try
 						{
-							_loggingService.LogInfo("Завершаем разговор по команде");
-							_userAgent.Hangup();
-							break;
+							await _userAgent.Call(uri, _config.SipConfiguration.CallerUsername, _config.SipConfiguration.CallerPassword, _mediaSession);
+							_loggingService.LogInfo($"Звонок инициирован на {uri}");
+						}
+						catch (Exception ex)
+						{
+							_loggingService.LogError($"Ошибка при звонке: {ex.Message}");
 						}
 					}
-
-					// Показываем прогресс каждые 5 секунд
-					if (i % 5 == 0 && i > 0)
+					else
 					{
-						_loggingService.LogInfo($"Прошло {i} секунд разговора...");
+						_loggingService.LogWarning("Звонок уже активен или система не готова");
 					}
-
-					await Task.Delay(1000, cancellationToken);
 				}
-
-				if (_callActive)
-				{
-					_loggingService.LogInfo("30 секунд разговора прошло, завершаю автоматически");
-					_userAgent.Hangup();
-				}
-				break;
 			}
 
-			// Показываем прогресс ожидания
-			var elapsed = (DateTime.Now - startTime).TotalSeconds;
-			if (elapsed % 5 < 0.6) // каждые 5 секунд
+			// Обработка активного звонка если он есть
+			if (_callActive)
 			{
-				_loggingService.LogInfo($"Ждем ответа... ({elapsed:F0}/25 секунд)");
+				_loggingService.LogInfo("ЗВОНОК АКТИВЕН! Медиа соединение установлено.");
+				_loggingService.LogInfo("Команды: 'h' - завершить звонок, 'q' - выйти");
+
+				// Продолжаем обрабатывать команды во время звонка
+				await Task.Delay(1000, cancellationToken);
 			}
-
-			await Task.Delay(500, cancellationToken);
-		}
-
-		if (!_callActive && !cancellationToken.IsCancellationRequested)
-		{
-			_loggingService.LogWarning("romaous не ответил на звонок в течение 25 секунд");
-			_loggingService.LogWarning("Возможные причины:");
-			_loggingService.LogWarning("  • romaous не онлайн в SIP клиенте");
-			_loggingService.LogWarning("  • У него нет приложения Linphone");
-			_loggingService.LogWarning("  • Проблемы с сетью или сервером");
+			else
+			{
+				// Простой режим ожидания
+				await Task.Delay(500, cancellationToken);
+			}
 		}
 	}
 
@@ -454,21 +502,22 @@ class SafeSipCaller
 	{
 		_workflow = _serviceProvider!.GetRequiredService<SipWorkflow>();
 
-		// Добавляем операции в workflow
+		// Добавляем операции в workflow - только регистрация, БЕЗ автоматического звонка
 		if (_sipTransport != null)
 		{
 			var registrationOp = new SipRegistrationOperation(_sipTransport, _config.SipConfiguration.Server, _config.SipConfiguration.CallerUsername, _config.SipConfiguration.CallerPassword);
 			_workflow.AddOperation(registrationOp);
 		}
 
-		if (_userAgent != null && _mediaSession != null)
-		{
-			string uri = $"sip:{_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}";
-			var callOp = new SipCallOperation(_userAgent, uri, _config.SipConfiguration.CallerUsername, _config.SipConfiguration.CallerPassword, _mediaSession);
-			_workflow.AddOperation(callOp);
-		}
+		// УБИРАЕМ автоматический звонок из workflow - звонки будут через UI
+		// if (_userAgent != null && _mediaSession != null)
+		// {
+		// 	string uri = $"sip:{_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}";
+		// 	var callOp = new SipCallOperation(_userAgent, uri, _config.SipConfiguration.CallerUsername, _config.SipConfiguration.CallerPassword, _mediaSession);
+		// 	_workflow.AddOperation(callOp);
+		// }
 
-		_loggingService!.LogInfo("SIP Workflow настроен (регистрация → звонок)");
+		_loggingService!.LogInfo("SIP Workflow настроен (только регистрация, БЕЗ автоматического звонка)");
 	}
 
 	/// <summary>
@@ -550,7 +599,6 @@ class SafeSipCaller
 		}
 
 		_serviceProvider?.Dispose();
-		Log.CloseAndFlush();
 		Environment.Exit(0);
 	}
 }

@@ -12,6 +12,7 @@ namespace ConsoleApp.WebServer
         private bool _isRunning = false;
         private readonly string _url;
         private readonly ILogger<SimpleHttpServer> _logger;
+        private Func<object>? _getRegistrationStatus;
 
         public SimpleHttpServer(ILogger<SimpleHttpServer> logger, string url = "http://localhost:8080/")
         {
@@ -69,6 +70,16 @@ namespace ConsoleApp.WebServer
                     // Получение логов из браузера
                     await ProcessBrowserLog(request, response);
                 }
+                else if (request.Url?.AbsolutePath == "/status" && request.HttpMethod == "GET")
+                {
+                    // Получение статуса регистрации
+                    await ProcessStatusRequest(request, response);
+                }
+                else if (request.Url?.AbsolutePath == "/call" && request.HttpMethod == "POST")
+                {
+                    // Управление звонками
+                    await ProcessCallRequest(request, response);
+                }
                 else
                 {
                     // 404 Not Found
@@ -108,6 +119,83 @@ namespace ConsoleApp.WebServer
         }
 
         public event Action<byte[]>? OnAudioDataReceived;
+        public event Action<string>? OnCallRequested;
+
+        public void SetRegistrationStatusProvider(Func<object> getRegistrationStatus)
+        {
+            _getRegistrationStatus = getRegistrationStatus;
+        }
+
+        private async Task ProcessStatusRequest(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            try
+            {
+                var status = _getRegistrationStatus?.Invoke() ?? new {
+                    isRegistered = false,
+                    currentState = "Unknown",
+                    description = "Статус недоступен"
+                };
+
+                var jsonResponse = JsonSerializer.Serialize(status, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                });
+
+                response.StatusCode = 200;
+                response.ContentType = "application/json; charset=UTF-8";
+                var buffer = Encoding.UTF8.GetBytes(jsonResponse);
+                response.ContentLength64 = buffer.Length;
+                await response.OutputStream.WriteAsync(buffer);
+
+                _logger.LogDebug("Отправлен статус регистрации: {Status}", jsonResponse);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ошибка получения статуса регистрации");
+                response.StatusCode = 500;
+                var errorResponse = Encoding.UTF8.GetBytes("{\"error\":\"Internal server error\"}");
+                response.ContentLength64 = errorResponse.Length;
+                await response.OutputStream.WriteAsync(errorResponse);
+            }
+        }
+
+        private async Task ProcessCallRequest(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            try
+            {
+                using var reader = new StreamReader(request.InputStream);
+                var jsonContent = await reader.ReadToEndAsync();
+
+                var callRequest = JsonSerializer.Deserialize<JsonElement>(jsonContent);
+                var action = callRequest.GetProperty("action").GetString();
+
+                _logger.LogInformation("Получен запрос звонка: {Action}", action);
+
+                // Уведомляем Program.cs о запросе звонка
+                OnCallRequested?.Invoke(action ?? "unknown");
+
+                var successResponse = JsonSerializer.Serialize(new {
+                    status = "ok",
+                    message = action == "start" ? "Звонок инициирован" : "Звонок завершен"
+                });
+
+                response.StatusCode = 200;
+                response.ContentType = "application/json; charset=UTF-8";
+                var buffer = Encoding.UTF8.GetBytes(successResponse);
+                response.ContentLength64 = buffer.Length;
+                await response.OutputStream.WriteAsync(buffer);
+
+                _logger.LogDebug("Обработан запрос звонка: {Action}", action);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ошибка обработки запроса звонка");
+                response.StatusCode = 500;
+                var errorResponse = Encoding.UTF8.GetBytes("{\"error\":\"Internal server error\"}");
+                response.ContentLength64 = errorResponse.Length;
+                await response.OutputStream.WriteAsync(errorResponse);
+            }
+        }
 
         private async Task ProcessBrowserLog(HttpListenerRequest request, HttpListenerResponse response)
         {
@@ -218,6 +306,16 @@ namespace ConsoleApp.WebServer
             color: #991b1b;
             border: 1px solid #fecaca;
         }
+        .status.registered {
+            background: #f0fff4;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+        }
+        .status.registering {
+            background: #fffbeb;
+            color: #92400e;
+            border: 1px solid #fed7aa;
+        }
         button {
             background: #718096;
             color: white;
@@ -246,17 +344,34 @@ namespace ConsoleApp.WebServer
         .recording-btn:hover:not(:disabled) {
             background: #c53030;
         }
+        .call-btn {
+            background: #38a169;
+        }
+        .call-btn:hover:not(:disabled) {
+            background: #2f855a;
+        }
+        hr {
+            border: none;
+            height: 1px;
+            background: #e2e8f0;
+            margin: 20px 0;
+        }
     </style>
 </head>
 <body>
     <div class='container'>
         <h1>SIP Audio Bridge</h1>
 
-        <div id='status' class='status ready'>
-            Готов к работе
+        <div id='registrationStatus' class='status ready'>
+            <span id='regStatusIcon'>[...]</span> <span id='regStatusText'>Проверка регистрации...</span>
         </div>
 
-        <button id='startBtn' onclick='startRecording()'>Начать запись</button>
+        <button id='callBtn' onclick='makeCall()' disabled class='call-btn'>Позвонить</button>
+        <button id='hangupBtn' onclick='hangupCall()' disabled class='recording-btn'>Завершить звонок</button>
+
+        <hr style='margin: 20px 0; border: 1px solid #e2e8f0;'>
+
+        <button id='startBtn' onclick='startRecording()'>Начать запись микрофона</button>
         <button id='stopBtn' onclick='stopRecording()' disabled class='recording-btn'>Остановить запись</button>
     </div>
 
@@ -487,6 +602,142 @@ namespace ConsoleApp.WebServer
         }
 
         log('Страница загружена. Готов к работе!');
+
+        // Функции для работы со статусом регистрации
+        async function checkRegistrationStatus() {
+            try {
+                const response = await fetch('/status');
+                if (response.ok) {
+                    const status = await response.json();
+                    updateRegistrationStatus(status);
+                } else {
+                    updateRegistrationStatus({
+                        isRegistered: false,
+                        currentState: 'Error',
+                        description: 'Ошибка получения статуса'
+                    });
+                }
+            } catch (error) {
+                logError(`Ошибка проверки регистрации: ${error.message}`);
+                updateRegistrationStatus({
+                    isRegistered: false,
+                    currentState: 'Error',
+                    description: 'Ошибка сети'
+                });
+            }
+        }
+
+        function updateRegistrationStatus(status) {
+            const regStatusElement = document.getElementById('registrationStatus');
+            const iconElement = document.getElementById('regStatusIcon');
+            const textElement = document.getElementById('regStatusText');
+            const callBtn = document.getElementById('callBtn');
+
+            if (status.isRegistered) {
+                regStatusElement.className = 'status registered';
+                iconElement.textContent = '[OK]';
+                textElement.textContent = 'Регистрация успешна - можно звонить';
+                callBtn.disabled = false;
+                log('SIP регистрация успешна! Кнопка звонка активирована.');
+            } else if (status.currentState === 'Registering') {
+                regStatusElement.className = 'status registering';
+                iconElement.textContent = '[...]';
+                textElement.textContent = 'Регистрация...';
+                callBtn.disabled = true;
+                log('Выполняется SIP регистрация...');
+            } else if (status.currentState === 'Error' || status.currentState === 'Failed') {
+                regStatusElement.className = 'status error';
+                iconElement.textContent = '[ERR]';
+                textElement.textContent = 'Ошибка регистрации';
+                callBtn.disabled = true;
+                logError('Ошибка SIP регистрации');
+            } else {
+                regStatusElement.className = 'status ready';
+                iconElement.textContent = '[...]';
+                textElement.textContent = status.description || 'Проверка регистрации...';
+                callBtn.disabled = true;
+            }
+
+            log(`Статус регистрации: ${status.currentState} - ${status.description}`);
+        }
+
+        // Функции для управления звонками
+        async function makeCall() {
+            try {
+                log('Инициируем звонок...');
+
+                const response = await fetch('/call', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ action: 'start' })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    log(`Звонок инициирован: ${result.message || 'успешно'}`);
+
+                    // Обновляем UI
+                    const callBtn = document.getElementById('callBtn');
+                    const hangupBtn = document.getElementById('hangupBtn');
+                    callBtn.disabled = true;
+                    hangupBtn.disabled = false;
+
+                    // Автоматически начинаем запись микрофона при звонке
+                    if (!isRecording) {
+                        log('Автоматически начинаем запись микрофона для звонка');
+                        startRecording();
+                    }
+                } else {
+                    logError(`Ошибка звонка: ${response.status}`);
+                }
+            } catch (error) {
+                logError(`Ошибка при звонке: ${error.message}`);
+            }
+        }
+
+        async function hangupCall() {
+            try {
+                log('Завершаем звонок...');
+
+                const response = await fetch('/call', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ action: 'hangup' })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    log(`Звонок завершен: ${result.message || 'успешно'}`);
+                } else {
+                    logError(`Ошибка завершения звонка: ${response.status}`);
+                }
+
+                // Обновляем UI в любом случае
+                const callBtn = document.getElementById('callBtn');
+                const hangupBtn = document.getElementById('hangupBtn');
+                callBtn.disabled = false;
+                hangupBtn.disabled = true;
+
+                // Останавливаем запись при завершении звонка
+                if (isRecording) {
+                    log('Останавливаем запись микрофона после завершения звонка');
+                    stopRecording();
+                }
+
+            } catch (error) {
+                logError(`Ошибка при завершении звонка: ${error.message}`);
+            }
+        }
+
+        // Проверяем статус регистрации при загрузке страницы
+        checkRegistrationStatus();
+
+        // Обновляем статус регистрации каждые 3 секунды
+        setInterval(checkRegistrationStatus, 3000);
     </script>
 </body>
 </html>";

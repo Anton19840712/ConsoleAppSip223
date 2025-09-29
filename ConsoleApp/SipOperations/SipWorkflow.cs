@@ -73,6 +73,9 @@ namespace ConsoleApp.SipOperations
                         return false;
                     }
 
+                    // После успешного выполнения операции обновляем состояние
+                    UpdateStateAfterSuccessfulOperation(operation);
+
                     _logger.LogInformation("Операция {OperationName} выполнена успешно", operation.OperationName);
                 }
 
@@ -100,6 +103,24 @@ namespace ConsoleApp.SipOperations
                     break;
                 case "SIP Call":
                     _stateMachine.TransitionTo(SipCallState.Calling);
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Обновляет состояние машины состояний после успешного выполнения операции
+        /// </summary>
+        /// <param name="operation">Успешно выполненная операция</param>
+        private void UpdateStateAfterSuccessfulOperation(ISipOperation operation)
+        {
+            switch (operation.OperationName)
+            {
+                case "SIP Registration":
+                    _stateMachine.TransitionTo(SipCallState.Registered);
+                    _logger.LogInformation("SIP регистрация успешно завершена!");
+                    break;
+                case "SIP Call":
+                    // Для звонков состояние будет обновляться через события SIP
                     break;
             }
         }
