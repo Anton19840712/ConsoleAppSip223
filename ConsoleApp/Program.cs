@@ -161,6 +161,33 @@ class SafeSipCaller
 				}
 			});
 
+			// Устанавливаем провайдер статуса звонка
+			_webServer.SetCallStatusProvider(() =>
+			{
+				if (_userAgent != null)
+				{
+					var isActive = _userAgent.IsCallActive;
+					var currentState = _callActive ? "Connected" : (_userAgent.IsCallActive ? "Active" : "Idle");
+					var description = isActive ? "Звонок активен" : "Нет активного звонка";
+
+					return new {
+						isActive = isActive,
+						currentState = currentState,
+						description = description,
+						callActive = _callActive
+					};
+				}
+				else
+				{
+					return new {
+						isActive = false,
+						currentState = "Idle",
+						description = "UserAgent не инициализирован",
+						callActive = false
+					};
+				}
+			});
+
 			// Запускаем сервер в фоновом режиме
 			_ = Task.Run(() => _webServer.StartAsync());
 

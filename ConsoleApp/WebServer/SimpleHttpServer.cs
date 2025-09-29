@@ -13,6 +13,7 @@ namespace ConsoleApp.WebServer
         private readonly string _url;
         private readonly ILogger<SimpleHttpServer> _logger;
         private Func<object>? _getRegistrationStatus;
+        private Func<object>? _getCallStatus;
 
         public SimpleHttpServer(ILogger<SimpleHttpServer> logger, string url = "http://localhost:8080/")
         {
@@ -80,6 +81,11 @@ namespace ConsoleApp.WebServer
                     // Управление звонками
                     await ProcessCallRequest(request, response);
                 }
+                else if (request.Url?.AbsolutePath == "/call-status" && request.HttpMethod == "GET")
+                {
+                    // Получение статуса звонка
+                    await ProcessCallStatusRequest(request, response);
+                }
                 else
                 {
                     // 404 Not Found
@@ -124,6 +130,11 @@ namespace ConsoleApp.WebServer
         public void SetRegistrationStatusProvider(Func<object> getRegistrationStatus)
         {
             _getRegistrationStatus = getRegistrationStatus;
+        }
+
+        public void SetCallStatusProvider(Func<object> getCallStatus)
+        {
+            _getCallStatus = getCallStatus;
         }
 
         private async Task ProcessStatusRequest(HttpListenerRequest request, HttpListenerResponse response)
@@ -190,6 +201,39 @@ namespace ConsoleApp.WebServer
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Ошибка обработки запроса звонка");
+                response.StatusCode = 500;
+                var errorResponse = Encoding.UTF8.GetBytes("{\"error\":\"Internal server error\"}");
+                response.ContentLength64 = errorResponse.Length;
+                await response.OutputStream.WriteAsync(errorResponse);
+            }
+        }
+
+        private async Task ProcessCallStatusRequest(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            try
+            {
+                var status = _getCallStatus?.Invoke() ?? new {
+                    isActive = false,
+                    currentState = "Idle",
+                    description = "Нет активного звонка"
+                };
+
+                var jsonResponse = JsonSerializer.Serialize(status, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                });
+
+                response.StatusCode = 200;
+                response.ContentType = "application/json; charset=UTF-8";
+                var buffer = Encoding.UTF8.GetBytes(jsonResponse);
+                response.ContentLength64 = buffer.Length;
+                await response.OutputStream.WriteAsync(buffer);
+
+                _logger.LogDebug("Отправлен статус звонка: {Status}", jsonResponse);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ошибка получения статуса звонка");
                 response.StatusCode = 500;
                 var errorResponse = Encoding.UTF8.GetBytes("{\"error\":\"Internal server error\"}");
                 response.ContentLength64 = errorResponse.Length;
@@ -350,12 +394,6 @@ namespace ConsoleApp.WebServer
         .call-btn:hover:not(:disabled) {
             background: #2f855a;
         }
-        hr {
-            border: none;
-            height: 1px;
-            background: #e2e8f0;
-            margin: 20px 0;
-        }
     </style>
 </head>
 <body>
@@ -368,11 +406,6 @@ namespace ConsoleApp.WebServer
 
         <button id='callBtn' onclick='makeCall()' disabled class='call-btn'>Позвонить</button>
         <button id='hangupBtn' onclick='hangupCall()' disabled class='recording-btn'>Завершить звонок</button>
-
-        <hr style='margin: 20px 0; border: 1px solid #e2e8f0;'>
-
-        <button id='startBtn' onclick='startRecording()'>Начать запись микрофона</button>
-        <button id='stopBtn' onclick='stopRecording()' disabled class='recording-btn'>Остановить запись</button>
     </div>
 
     <script>
@@ -507,12 +540,10 @@ namespace ConsoleApp.WebServer
                 processor.connect(audioContext.destination);
 
                 isRecording = true;
-                updateUI();
                 log('Запись началась (Web Audio API, PCM 16-bit, 8kHz)');
 
             } catch (error) {
                 logError(`Ошибка: ${error.message}`);
-                updateStatus('error', `Ошибка доступа к микрофону: ${error.message}`);
             }
         }
 
@@ -537,7 +568,6 @@ namespace ConsoleApp.WebServer
                     audioContext.close();
                 }
 
-                updateUI();
                 log('Запись остановлена');
             }
         }
@@ -581,25 +611,6 @@ namespace ConsoleApp.WebServer
             }
         }
 
-        function updateUI() {
-            const startBtn = document.getElementById('startBtn');
-            const stopBtn = document.getElementById('stopBtn');
-
-            startBtn.disabled = isRecording;
-            stopBtn.disabled = !isRecording;
-
-            if (isRecording) {
-                updateStatus('recording', 'Идет запись...');
-            } else {
-                updateStatus('ready', 'Готов к работе');
-            }
-        }
-
-        function updateStatus(type, message) {
-            const status = document.getElementById('status');
-            status.className = `status ${type}`;
-            status.textContent = message;
-        }
 
         log('Страница загружена. Готов к работе!');
 
@@ -684,11 +695,8 @@ namespace ConsoleApp.WebServer
                     callBtn.disabled = true;
                     hangupBtn.disabled = false;
 
-                    // Автоматически начинаем запись микрофона при звонке
-                    if (!isRecording) {
-                        log('Автоматически начинаем запись микрофона для звонка');
-                        startRecording();
-                    }
+                    // Запись микрофона начнется автоматически при ответе абонента
+                    log('Ожидаем ответа абонента для начала записи микрофона...');
                 } else {
                     logError(`Ошибка звонка: ${response.status}`);
                 }
@@ -722,14 +730,43 @@ namespace ConsoleApp.WebServer
                 callBtn.disabled = false;
                 hangupBtn.disabled = true;
 
-                // Останавливаем запись при завершении звонка
-                if (isRecording) {
-                    log('Останавливаем запись микрофона после завершения звонка');
-                    stopRecording();
-                }
+                // Запись остановится автоматически при изменении статуса звонка
 
             } catch (error) {
                 logError(`Ошибка при завершении звонка: ${error.message}`);
+            }
+        }
+
+        // Функции для отслеживания статуса звонка
+        let lastCallStatus = { callActive: false };
+
+        async function checkCallStatus() {
+            try {
+                const response = await fetch('/call-status');
+                if (response.ok) {
+                    const status = await response.json();
+
+                    // Проверяем изменение статуса звонка
+                    if (status.callActive && !lastCallStatus.callActive) {
+                        // Абонент ответил - начинаем запись микрофона
+                        log('Абонент ответил! Автоматически начинаем запись микрофона...');
+                        if (!isRecording) {
+                            startRecording();
+                        }
+                    } else if (!status.callActive && lastCallStatus.callActive) {
+                        // Звонок завершен - останавливаем запись
+                        log('Звонок завершен. Останавливаем запись микрофона.');
+                        if (isRecording) {
+                            stopRecording();
+                        }
+                    }
+
+                    lastCallStatus = status;
+                } else {
+                    logError(`Ошибка получения статуса звонка: ${response.status}`);
+                }
+            } catch (error) {
+                logError(`Ошибка при проверке статуса звонка: ${error.message}`);
             }
         }
 
@@ -738,6 +775,9 @@ namespace ConsoleApp.WebServer
 
         // Обновляем статус регистрации каждые 3 секунды
         setInterval(checkRegistrationStatus, 3000);
+
+        // Проверяем статус звонка каждые 2 секунды (чаще для быстрой реакции)
+        setInterval(checkCallStatus, 2000);
     </script>
 </body>
 </html>";
