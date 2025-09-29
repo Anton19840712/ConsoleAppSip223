@@ -7,7 +7,7 @@ namespace ConsoleApp.WebServer
     /// <summary>
     /// Custom AudioSource для передачи аудио данных из браузера в SIP RTP поток
     /// </summary>
-    public class BrowserAudioSource : IAudioSource
+    public class BrowserAudioSource : IAudioSource, IDisposable
     {
         private readonly ConcurrentQueue<byte[]> _audioQueue = new();
         private readonly ILogger<BrowserAudioSource> _logger;
@@ -199,10 +199,10 @@ namespace ConsoleApp.WebServer
             }
 
             // Конвертируем PCM 16-bit в G.711 μ-law
-            var mulawData = ConvertToPCM(audioData);
+            var g711Data = ConvertPCMToG711(audioData);
 
-            _audioQueue.Enqueue(mulawData);
-            _logger.LogDebug("BrowserAudioSource: добавлено {InputLength} байт PCM → {OutputLength} байт μ-law (очередь: {QueueCount})", audioData.Length, mulawData.Length, _audioQueue.Count);
+            _audioQueue.Enqueue(g711Data);
+            _logger.LogDebug("BrowserAudioSource: добавлено {InputLength} байт PCM → {OutputLength} байт G.711 (очередь: {QueueCount})", audioData.Length, g711Data.Length, _audioQueue.Count);
         }
 
         private readonly Queue<byte> _continuousAudioBuffer = new();
@@ -229,7 +229,7 @@ namespace ConsoleApp.WebServer
             var frame = new byte[samplesPerFrame];
             int bytesRead = 0;
 
-            // Простая и надежная логика: отправляем все данные, только если буфер достаточно заполнен
+            // Улучшенная логика буферизации для устранения щелчков
             if (_continuousAudioBuffer.Count >= samplesPerFrame)
             {
                 // Есть полный кадр - отправляем его
@@ -240,23 +240,14 @@ namespace ConsoleApp.WebServer
                 }
                 OnAudioSourceEncodedSample.Invoke(8000, frame);
             }
-            else if (_continuousAudioBuffer.Count > 0 && _continuousAudioBuffer.Count >= 80) // Половина кадра
+            else
             {
-                // Есть частичный кадр (минимум половина) - отправляем с дополнением
-                for (int i = 0; i < samplesPerFrame && _continuousAudioBuffer.Count > 0; i++)
-                {
-                    frame[i] = _continuousAudioBuffer.Dequeue();
-                    bytesRead++;
-                }
-
-                // Дополняем правильной тишиной
-                if (bytesRead < samplesPerFrame)
-                {
-                    Array.Fill(frame, (byte)0x80, bytesRead, samplesPerFrame - bytesRead);
-                }
+                // Не хватает данных - отправляем тишину для поддержания непрерывности потока
+                // Это предотвращает щелчки и разрывы в аудиопотоке
+                byte silenceValue = _useAlaw ? (byte)0x55 : (byte)0x7F; // Правильная тишина: A-law=0x55, μ-law=0x7F
+                Array.Fill(frame, silenceValue, 0, samplesPerFrame);
                 OnAudioSourceEncodedSample.Invoke(8000, frame);
             }
-            // Если данных слишком мало (меньше половины кадра) - ждем накопления
 
             // Логируем состояние буфера
             if (_continuousAudioBuffer.Count % 500 == 0 || _continuousAudioBuffer.Count > 2000 || bytesRead == 0)
@@ -266,9 +257,9 @@ namespace ConsoleApp.WebServer
         }
 
         /// <summary>
-        /// Конвертирует PCM 16-bit данные в G.711 μ-law формат
+        /// Конвертирует PCM 16-bit данные в G.711 формат (A-law или μ-law)
         /// </summary>
-        private byte[] ConvertToPCM(byte[] pcmData)
+        private byte[] ConvertPCMToG711(byte[] pcmData)
         {
             _logger.LogDebug("Конвертация PCM: получено {Length} байт", pcmData.Length);
 
@@ -280,11 +271,12 @@ namespace ConsoleApp.WebServer
                 pcmData[pcmData.Length - 1] = 0;
             }
 
-            // Конвертируем bytes в Int16 samples, затем в G.711 μ-law
+            // Конвертируем bytes в Int16 samples, затем в G.711 формат
             int sampleCount = pcmData.Length / 2;
-            var mulawData = new byte[sampleCount];
+            var g711Data = new byte[sampleCount];
 
-            _logger.LogDebug("Обрабатываем {SampleCount} PCM сэмплов → G.711 μ-law", sampleCount);
+            string formatName = _useAlaw ? "A-law" : "μ-law";
+            _logger.LogDebug("Обрабатываем {SampleCount} PCM сэмплов → G.711 {FormatName}", sampleCount, formatName);
 
             for (int i = 0; i < sampleCount; i++)
             {
@@ -292,21 +284,33 @@ namespace ConsoleApp.WebServer
                 int byteIndex = i * 2;
                 short sample = (short)(pcmData[byteIndex] | (pcmData[byteIndex + 1] << 8));
 
+                // Применяем усиление громкости с ограничением клиппинга
+                int amplifiedSample = (int)(sample * AUDIO_GAIN);
+
+                // Ограничиваем значение в пределах 16-bit signed integer
+                if (amplifiedSample > short.MaxValue)
+                    amplifiedSample = short.MaxValue;
+                else if (amplifiedSample < short.MinValue)
+                    amplifiedSample = short.MinValue;
+
+                short finalSample = (short)amplifiedSample;
+
                 // Дополнительная проверка и отладка первых сэмплов
                 if (i < 5)
                 {
-                    _logger.LogTrace("Сэмпл {Index}: байты [{Byte1:X2} {Byte2:X2}] → Int16: {Sample}", i, pcmData[byteIndex], pcmData[byteIndex + 1], sample);
+                    _logger.LogTrace("Сэмпл {Index}: исходный={Sample}, усиленный={FinalSample} (gain={Gain})", i, sample, finalSample, AUDIO_GAIN);
                 }
 
                 // Конвертируем в G.711 (μ-law или A-law автоматически)
-                mulawData[i] = LinearToG711(sample);
+                g711Data[i] = LinearToG711(finalSample);
             }
 
-            _logger.LogDebug("Конвертация завершена: {SampleCount} μ-law байт", sampleCount);
-            return mulawData;
+            _logger.LogDebug("Конвертация завершена: {SampleCount} G.711 {FormatName} байт", sampleCount, formatName);
+            return g711Data;
         }
 
         private static bool _useAlaw = false; // Будет установлено при выборе формата
+        private const float AUDIO_GAIN = 2.0f; // Усиление громкости (можно настроить от 1.0 до 4.0)
 
         /// <summary>
         /// Конвертирует линейный PCM в G.711 формат (A-law или μ-law)

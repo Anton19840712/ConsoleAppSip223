@@ -207,7 +207,7 @@ class SafeSipCaller
 	{
 		try
 		{
-			_webServer?.Stop();
+			_webServer?.Dispose();
 			_loggingService!.LogInfo("Веб-сервер остановлен");
 		}
 		catch (Exception ex)
@@ -219,12 +219,12 @@ class SafeSipCaller
 	/// <summary>
 	/// Обрабатывает аудио данные, полученные из браузера
 	/// </summary>
-	/// <param name="audioData">Аудио данные в формате WebM/Opus</param>
+	/// <param name="audioData">Аудио данные в формате PCM 16-bit (из Web Audio API)</param>
 	private static void ProcessBrowserAudio(byte[] audioData)
 	{
 		try
 		{
-			_loggingService!.LogDebug($"Обрабатываем аудио: {audioData.Length} байт WebM/Opus");
+			_loggingService!.LogDebug($"Обрабатываем аудио: {audioData.Length} байт PCM 16-bit");
 			_loggingService.LogDebug($"Состояние: _callActive={_callActive}, _mediaSession={(_mediaSession != null ? "есть" : "null")}");
 
 			if (_browserAudioSource != null)
@@ -328,6 +328,7 @@ class SafeSipCaller
 				AudioSource = _browserAudioSource
 			};
 			_mediaSession = new VoIPMediaSession(mediaEndPoints);
+			// _mediaSession = new VoIPMediaSession(); // Использовал встроенный источник для тестирования
 
 			// Добавляем bandwidth control через SIPSorcery API
 			if (_mediaSession.AudioLocalTrack != null)
@@ -360,12 +361,19 @@ class SafeSipCaller
 			// Настройка Chain of Responsibility для событий
 			SetupEventChain();
 
-			_userAgent.ClientCallAnswered += (uac, resp) => {
+			_userAgent.ClientCallAnswered += async (uac, resp) => {
 				_eventChain?.Handle("Answered", resp);
 				_workflow?.HandleSipEvent("Answered");
 				// Устанавливаем флаг активного звонка
 				_callActive = true;
 				_loggingService.LogInfo("_callActive = true - звонок активен для передачи аудио!");
+
+				// Запускаем BrowserAudioSource для передачи аудио из браузера в SIP
+				if (_browserAudioSource != null)
+				{
+					await _browserAudioSource.StartAudio();
+					_loggingService.LogInfo("BrowserAudioSource запущен - готов к передаче аудио!");
+				}
 			};
 
 			_userAgent.ClientCallFailed += (uac, err, resp) => {
@@ -389,6 +397,13 @@ class SafeSipCaller
 				// Сбрасываем флаг активного звонка
 				_callActive = false;
 				_loggingService.LogInfo("_callActive = false - звонок завершен");
+
+				// Останавливаем BrowserAudioSource
+				if (_browserAudioSource != null)
+				{
+					_browserAudioSource.StopAudio();
+					_loggingService.LogInfo("BrowserAudioSource остановлен");
+				}
 			};
 
 			_loggingService.LogInfo("События настроены через Chain of Responsibility");
@@ -590,12 +605,46 @@ class SafeSipCaller
 	{
 		try
 		{
+			_loggingService!.LogInfo("Начинаем освобождение ресурсов...");
+
+			// Останавливаем и освобождаем веб-сервер
+			if (_webServer != null)
+			{
+				_webServer.Dispose();
+				_webServer = null;
+				_loggingService.LogInfo("WebServer освобожден");
+			}
+
+			// Освобождаем BrowserAudioSource
+			if (_browserAudioSource != null)
+			{
+				_browserAudioSource.Dispose();
+				_browserAudioSource = null;
+				_loggingService.LogInfo("BrowserAudioSource освобожден");
+			}
+
+			// Освобождаем медиа-сессию
+			if (_mediaSession != null)
+			{
+				try
+				{
+					_mediaSession.Close("cleanup");
+					((IDisposable)_mediaSession)?.Dispose();
+				}
+				catch (Exception ex)
+				{
+					_loggingService.LogError($"Ошибка закрытия MediaSession: {ex.Message}");
+				}
+				_mediaSession = null;
+				_loggingService.LogInfo("MediaSession освобождена");
+			}
+
+			// Вызываем цепочку очистки для SIP ресурсов
 			SetupCleanupChain();
 			_cleanupChain?.Cleanup();
 
 			// Обнуляем ссылки
 			_userAgent = null;
-			_mediaSession = null;
 			_sipTransport = null;
 			_callActive = false;
 

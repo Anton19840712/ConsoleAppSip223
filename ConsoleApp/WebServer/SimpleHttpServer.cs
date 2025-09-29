@@ -6,7 +6,7 @@ using ConsoleApp.Models;
 
 namespace ConsoleApp.WebServer
 {
-    public class SimpleHttpServer
+    public class SimpleHttpServer : IDisposable
     {
         private HttpListener _listener;
         private bool _isRunning = false;
@@ -291,8 +291,29 @@ namespace ConsoleApp.WebServer
         public void Stop()
         {
             _isRunning = false;
-            _listener?.Stop();
-            _logger.LogInformation("HTTP сервер остановлен");
+            try
+            {
+                _listener?.Stop();
+                _listener?.Close();
+                _logger.LogInformation("HTTP сервер остановлен");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ошибка остановки HTTP сервера");
+            }
+        }
+
+        public void Dispose()
+        {
+            Stop();
+            try
+            {
+                ((IDisposable)_listener)?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ошибка освобождения ресурсов HTTP сервера");
+            }
         }
 
         private string GetMainPageHtml()
