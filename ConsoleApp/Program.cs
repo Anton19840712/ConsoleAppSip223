@@ -171,9 +171,9 @@ class SafeSipCaller
 					var description = isActive ? "Звонок активен" : "Нет активного звонка";
 
 					return new {
-						isActive = isActive,
-						currentState = currentState,
-						description = description,
+						isActive,
+						currentState,
+						description,
 						callActive = _callActive
 					};
 				}
