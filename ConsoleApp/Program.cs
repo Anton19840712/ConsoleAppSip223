@@ -64,7 +64,7 @@ class SafeSipCaller
 			_loggingService.LogInfo($"Сервер доступен: {_config.SipConfiguration.Server} (5.135.215.43)");
 
 			// Запускаем веб-сервер для получения аудио из браузера
-			StartWebServer();
+			await StartWebServer();
 
 			using (var cts = new CancellationTokenSource(_config.CallSettings.GeneralTimeoutMs))
 			{
@@ -115,7 +115,7 @@ class SafeSipCaller
 	/// <summary>
 	/// Запускает веб-сервер для получения аудио из браузера
 	/// </summary>
-	private static void StartWebServer()
+	private static async Task StartWebServer()
 	{
 		try
 		{
@@ -192,7 +192,11 @@ class SafeSipCaller
 			_ = Task.Run(() => _webServer.StartAsync());
 
 			_loggingService!.LogInfo("Веб-сервер запущен на http://localhost:8080/");
-			_loggingService.LogInfo("Откройте браузер для захвата микрофона");
+
+			// Автоматически открываем браузер
+			await Task.Delay(1000); // Даем время серверу запуститься
+			OpenBrowser("http://localhost:8080/");
+			_loggingService.LogInfo("Браузер открыт автоматически");
 		}
 		catch (Exception ex)
 		{
@@ -213,6 +217,61 @@ class SafeSipCaller
 		catch (Exception ex)
 		{
 			_loggingService!.LogError($"Ошибка остановки веб-сервера: {ex.Message}", ex);
+		}
+	}
+
+	/// <summary>
+	/// Открывает браузер с заданным URL в компактном окне
+	/// </summary>
+	/// <param name="url">URL для открытия</param>
+	private static void OpenBrowser(string url)
+	{
+		try
+		{
+			var processStartInfo = new System.Diagnostics.ProcessStartInfo();
+
+			if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
+			{
+				// Windows: открываем Chrome с компактным окном 400x600
+				var chromeArgs = $"--new-window --window-size=400,600 --window-position=100,100 \"{url}\"";
+				processStartInfo.FileName = "chrome";
+				processStartInfo.Arguments = chromeArgs;
+				processStartInfo.UseShellExecute = false;
+
+				try
+				{
+					System.Diagnostics.Process.Start(processStartInfo);
+				}
+				catch
+				{
+					// Fallback: стандартный браузер
+					processStartInfo.FileName = url;
+					processStartInfo.Arguments = "";
+					processStartInfo.UseShellExecute = true;
+					System.Diagnostics.Process.Start(processStartInfo);
+				}
+			}
+			else if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX))
+			{
+				// macOS: открываем в Safari или Chrome
+				processStartInfo.FileName = "open";
+				processStartInfo.Arguments = $"-a \"Google Chrome\" --args --new-window --window-size=400,600 \"{url}\"";
+				processStartInfo.UseShellExecute = false;
+				System.Diagnostics.Process.Start(processStartInfo);
+			}
+			else
+			{
+				// Linux: используем xdg-open
+				processStartInfo.FileName = "xdg-open";
+				processStartInfo.Arguments = url;
+				processStartInfo.UseShellExecute = false;
+				System.Diagnostics.Process.Start(processStartInfo);
+			}
+		}
+		catch (Exception ex)
+		{
+			_loggingService!.LogWarning($"Не удалось автоматически открыть браузер: {ex.Message}");
+			_loggingService.LogInfo("Откройте браузер вручную: http://localhost:8080/");
 		}
 	}
 
