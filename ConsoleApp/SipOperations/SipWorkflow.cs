@@ -146,6 +146,9 @@ namespace ConsoleApp.SipOperations
                 case "Registered":
                     _stateMachine.TransitionTo(SipCallState.Registered);
                     break;
+                case "Calling":
+                    _stateMachine.TransitionTo(SipCallState.Calling);
+                    break;
                 case "Trying":
                     _stateMachine.TransitionTo(SipCallState.Trying);
                     break;

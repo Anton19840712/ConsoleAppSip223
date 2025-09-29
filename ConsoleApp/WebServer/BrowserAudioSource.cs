@@ -34,22 +34,16 @@ namespace ConsoleApp.WebServer
         {
             return new List<AudioFormat>
             {
-                // Высококачественные кодеки (в порядке приоритета)
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.G722),    // G.722 - широкополосный звук (50-7000Hz)
-
-                // Opus (динамический payload type) - высочайшее качество
-                new AudioFormat(111, "opus", 48000, 2, "useinbandfec=1;minptime=10"),
-
-                // G.729 - хорошее сжатие и качество
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.G729),
-
-                // Linear PCM форматы для максимального качества
-                new AudioFormat(117, "L16", 16000, 1),  // 16kHz linear PCM
-                new AudioFormat(118, "L16", 8000, 1),   // 8kHz linear PCM
-
-                // Стандартные G.711 кодеки (запасной вариант)
+                // Стандартные G.711 кодеки с улучшениями (пока только эти работают стабильно)
                 new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA),    // G.711 A-law
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU)     // G.711 μ-law
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU),    // G.711 μ-law
+
+                // Высококачественные кодеки (в порядке приоритета) - пока закомментированы
+                // new AudioFormat(SDPWellKnownMediaFormatsEnum.G722),    // G.722 - широкополосный звук (50-7000Hz)
+                // new AudioFormat(111, "opus", 48000, 2, "useinbandfec=1;minptime=10"), // Opus
+                // new AudioFormat(SDPWellKnownMediaFormatsEnum.G729), // G.729
+                // new AudioFormat(117, "L16", 16000, 1),  // 16kHz linear PCM
+                // new AudioFormat(118, "L16", 8000, 1),   // 8kHz linear PCM
             };
         }
 
@@ -59,35 +53,18 @@ namespace ConsoleApp.WebServer
         public void SetAudioSourceFormat(AudioFormat audioFormat)
         {
             // Определяем тип кодирования по формату
+            // Сброс всех флагов
+            _useAlaw = false;
+            _useLinearPCM = false;
+
             if (audioFormat.FormatID == (int)SDPWellKnownMediaFormatsEnum.PCMA)
             {
                 _useAlaw = true;
-                _logger.LogInformation("BrowserAudioSource: установлен формат G.711 A-law");
-            }
-            else if (audioFormat.FormatID == (int)SDPWellKnownMediaFormatsEnum.G722)
-            {
-                _useAlaw = false; // G.722 использует свою логику
-                _logger.LogInformation("BrowserAudioSource: установлен формат G.722 (широкополосный)");
-            }
-            else if (audioFormat.FormatName?.ToLower() == "opus")
-            {
-                _useAlaw = false;
-                _logger.LogInformation("BrowserAudioSource: установлен формат Opus (высокое качество)");
-            }
-            else if (audioFormat.FormatID == (int)SDPWellKnownMediaFormatsEnum.G729)
-            {
-                _useAlaw = false;
-                _logger.LogInformation("BrowserAudioSource: установлен формат G.729");
-            }
-            else if (audioFormat.FormatName?.ToLower() == "l16")
-            {
-                _useAlaw = false;
-                _logger.LogInformation("BrowserAudioSource: установлен формат L16 (Linear PCM) @ {ClockRate}Hz", audioFormat.ClockRate);
+                _logger.LogInformation("BrowserAudioSource: установлен формат G.711 A-law с улучшениями!");
             }
             else
             {
-                _useAlaw = false;
-                _logger.LogInformation("BrowserAudioSource: установлен формат G.711 μ-law (по умолчанию)");
+                _logger.LogInformation("BrowserAudioSource: установлен формат G.711 μ-law с улучшениями!");
             }
         }
 
@@ -198,11 +175,12 @@ namespace ConsoleApp.WebServer
                 return;
             }
 
-            // Конвертируем PCM 16-bit в G.711 μ-law
-            var g711Data = ConvertPCMToG711(audioData);
+            // Конвертируем PCM в G.711 с улучшениями (громкость x2, правильная буферизация)
+            var convertedData = ConvertPCMToG711(audioData);
 
-            _audioQueue.Enqueue(g711Data);
-            _logger.LogDebug("BrowserAudioSource: добавлено {InputLength} байт PCM → {OutputLength} байт G.711 (очередь: {QueueCount})", audioData.Length, g711Data.Length, _audioQueue.Count);
+            _audioQueue.Enqueue(convertedData);
+            string formatInfo = "G.711";
+            _logger.LogDebug("BrowserAudioSource: добавлено {InputLength} байт PCM → {OutputLength} байт {Format} (очередь: {QueueCount})", audioData.Length, convertedData.Length, formatInfo, _audioQueue.Count);
         }
 
         private readonly Queue<byte> _continuousAudioBuffer = new();
@@ -214,7 +192,8 @@ namespace ConsoleApp.WebServer
         {
             if (!_isStarted || _isPaused || OnAudioSourceEncodedSample == null) return;
 
-            const int samplesPerFrame = 160; // G.711: 160 samples per 20ms at 8kHz
+            // G.711: 160 байт per 20ms frame @ 8kHz
+            int bytesPerFrame = 160;
 
             // Проверяем все блоки данных в очереди и добавляем их в непрерывный буфер
             while (_audioQueue.TryDequeue(out byte[]? audioData))
@@ -226,34 +205,89 @@ namespace ConsoleApp.WebServer
             }
 
             // Формируем кадр из непрерывного буфера
-            var frame = new byte[samplesPerFrame];
+            var frame = new byte[bytesPerFrame];
             int bytesRead = 0;
 
             // Улучшенная логика буферизации для устранения щелчков
-            if (_continuousAudioBuffer.Count >= samplesPerFrame)
+            if (_continuousAudioBuffer.Count >= bytesPerFrame)
             {
                 // Есть полный кадр - отправляем его
-                for (int i = 0; i < samplesPerFrame; i++)
+                for (int i = 0; i < bytesPerFrame; i++)
                 {
                     frame[i] = _continuousAudioBuffer.Dequeue();
                     bytesRead++;
                 }
+                // G.711 @ 8kHz
                 OnAudioSourceEncodedSample.Invoke(8000, frame);
             }
             else
             {
                 // Не хватает данных - отправляем тишину для поддержания непрерывности потока
-                // Это предотвращает щелчки и разрывы в аудиопотоке
-                byte silenceValue = _useAlaw ? (byte)0x55 : (byte)0x7F; // Правильная тишина: A-law=0x55, μ-law=0x7F
-                Array.Fill(frame, silenceValue, 0, samplesPerFrame);
+                // Для G.711: A-law=0x55, μ-law=0x7F
+                byte silenceValue = _useAlaw ? (byte)0x55 : (byte)0x7F;
+                Array.Fill(frame, silenceValue, 0, bytesPerFrame);
                 OnAudioSourceEncodedSample.Invoke(8000, frame);
             }
 
             // Логируем состояние буфера
             if (_continuousAudioBuffer.Count % 500 == 0 || _continuousAudioBuffer.Count > 2000 || bytesRead == 0)
             {
-                _logger.LogDebug("RTP: {BytesRead}/{SamplesPerFrame}, буфер: {BufferCount}, статус: {Status}", bytesRead, samplesPerFrame, _continuousAudioBuffer.Count, (bytesRead > 0 ? "АУДИО" : "ТИШИНА"));
+                string format = "G.711";
+                _logger.LogDebug("RTP {Format}: {BytesRead}/{BytesPerFrame}, буфер: {BufferCount}, статус: {Status}", format, bytesRead, bytesPerFrame, _continuousAudioBuffer.Count, (bytesRead > 0 ? "АУДИО" : "ТИШИНА"));
             }
+        }
+
+        /// <summary>
+        /// Конвертирует PCM 16-bit данные в L16 формат (с усилением громкости)
+        /// </summary>
+        private byte[] ConvertPCMToL16(byte[] pcmData)
+        {
+            _logger.LogDebug("Конвертация PCM → L16: получено {Length} байт", pcmData.Length);
+
+            // Проверяем, что данные кратны 2 (16-bit samples)
+            if (pcmData.Length % 2 != 0)
+            {
+                _logger.LogWarning("Некорректный размер PCM данных для L16, добавляем padding");
+                Array.Resize(ref pcmData, pcmData.Length + 1);
+                pcmData[pcmData.Length - 1] = 0;
+            }
+
+            // Для L16 просто применяем усиление громкости и возвращаем PCM данные
+            int sampleCount = pcmData.Length / 2;
+            var l16Data = new byte[pcmData.Length];
+
+            _logger.LogDebug("Обрабатываем {SampleCount} PCM сэмплов → L16 с усилением {Gain}", sampleCount, AUDIO_GAIN);
+
+            for (int i = 0; i < sampleCount; i++)
+            {
+                // Читаем 16-bit sample (little-endian от JavaScript)
+                int byteIndex = i * 2;
+                short sample = (short)(pcmData[byteIndex] | (pcmData[byteIndex + 1] << 8));
+
+                // Применяем усиление громкости с ограничением клиппинга
+                int amplifiedSample = (int)(sample * AUDIO_GAIN);
+
+                // Ограничиваем значение в пределах 16-bit signed integer
+                if (amplifiedSample > short.MaxValue)
+                    amplifiedSample = short.MaxValue;
+                else if (amplifiedSample < short.MinValue)
+                    amplifiedSample = short.MinValue;
+
+                short finalSample = (short)amplifiedSample;
+
+                // Записываем обратно в little-endian формате
+                l16Data[byteIndex] = (byte)(finalSample & 0xFF);
+                l16Data[byteIndex + 1] = (byte)((finalSample >> 8) & 0xFF);
+
+                // Дополнительная проверка и отладка первых сэмплов
+                if (i < 5)
+                {
+                    _logger.LogTrace("L16 сэмпл {Index}: исходный={Sample}, усиленный={FinalSample}", i, sample, finalSample);
+                }
+            }
+
+            _logger.LogDebug("Конвертация L16 завершена: {SampleCount} сэмплов", sampleCount);
+            return l16Data;
         }
 
         /// <summary>
@@ -310,6 +344,7 @@ namespace ConsoleApp.WebServer
         }
 
         private static bool _useAlaw = false; // Будет установлено при выборе формата
+        private static bool _useLinearPCM = false; // Для L16 формата
         private const float AUDIO_GAIN = 2.0f; // Усиление громкости (можно настроить от 1.0 до 4.0)
 
         /// <summary>

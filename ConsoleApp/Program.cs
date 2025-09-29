@@ -260,6 +260,9 @@ class SafeSipCaller
 					{
 						string uri = $"sip:{_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}";
 
+						// Устанавливаем состояние "Calling" перед началом звонка
+						_workflow?.HandleSipEvent("Calling");
+
 						// Выполняем звонок асинхронно
 						_ = Task.Run(async () =>
 						{
@@ -327,8 +330,8 @@ class SafeSipCaller
 			{
 				AudioSource = _browserAudioSource
 			};
-			_mediaSession = new VoIPMediaSession(mediaEndPoints);
-			// _mediaSession = new VoIPMediaSession(); // Использовал встроенный источник для тестирования
+			_mediaSession = new VoIPMediaSession(mediaEndPoints); // Наш BrowserAudioSource с улучшениями G.711
+			// _mediaSession = new VoIPMediaSession(); // Встроенный источник для сравнения
 
 			// Добавляем bandwidth control через SIPSorcery API
 			if (_mediaSession.AudioLocalTrack != null)
@@ -654,27 +657,5 @@ class SafeSipCaller
 		{
 			_loggingService!.LogError($"Критическая ошибка очистки: {ex.Message}", ex);
 		}
-	}
-
-	/// <summary>
-	/// Принудительно завершает приложение через 60 секунд для предотвращения зависания
-	/// </summary>
-	/// <param name="state">Объект состояния (не используется)</param>
-	private static void ForceExit(object state)
-	{
-		_loggingService?.LogWarning("ПРИНУДИТЕЛЬНЫЙ ВЫХОД ЧЕРЕЗ 60 СЕКУНД");
-		_loggingService?.LogWarning("Программа завершается для предотвращения зависания...");
-
-		try
-		{
-			SafeCleanup();
-		}
-		catch
-		{
-			// Игнорируем ошибки при принудительном выходе
-		}
-
-		_serviceProvider?.Dispose();
-		Environment.Exit(0);
 	}
 }
