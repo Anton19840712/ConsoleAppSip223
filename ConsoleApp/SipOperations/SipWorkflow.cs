@@ -108,6 +108,21 @@ namespace ConsoleApp.SipOperations
         }
 
         /// <summary>
+        /// Обновляет состояние после успешного завершения операции
+        /// </summary>
+        /// <param name="operation">Успешно завершенная операция</param>
+        private void UpdateStateAfterSuccessfulOperation(ISipOperation operation)
+        {
+            switch (operation.OperationName)
+            {
+                case "SIP Registration":
+                    _stateMachine.TransitionTo(SipCallState.Registered);
+                    break;
+                // Для звонка состояние будет обновляться через SIP события (Trying, Ringing, Connected)
+            }
+        }
+
+        /// <summary>
         /// Обновляет состояние машины состояний после успешного выполнения операции
         /// </summary>
         /// <param name="operation">Успешно выполненная операция</param>
