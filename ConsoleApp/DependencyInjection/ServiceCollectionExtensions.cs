@@ -26,7 +26,7 @@ namespace ConsoleApp.DependencyInjection
                 // Добавляем файловый логгер
                 builder.AddProvider(new ConsoleApp.Services.FileLoggerProvider(logFileName));
 
-                // Также можно оставить консольный логгер для отладки (по желанию)
+                // Консольный логгер отключен для чистого вывода команд
                 // builder.AddConsole();
             });
 
@@ -45,6 +45,27 @@ namespace ConsoleApp.DependencyInjection
             {
                 var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<BrowserAudioSource>();
                 return new BrowserAudioSource(logger);
+            });
+
+            // Регистрируем TestAudioSource для тестирования качества передачи
+            services.AddSingleton<TestAudioSource>(provider =>
+            {
+                var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<TestAudioSource>();
+                return new TestAudioSource(logger);
+            });
+
+            // Регистрируем TtsAudioSource для синтеза речи
+            services.AddSingleton<TtsAudioSource>(provider =>
+            {
+                var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<TtsAudioSource>();
+                return new TtsAudioSource(logger);
+            });
+
+            // Регистрируем WavAudioSource для воспроизведения WAV файлов
+            services.AddSingleton<WavAudioSource>(provider =>
+            {
+                var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<WavAudioSource>();
+                return new WavAudioSource(logger);
             });
 
             // Регистрируем SipWorkflow
