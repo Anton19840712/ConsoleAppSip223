@@ -805,14 +805,18 @@ namespace ConsoleApp.WebServer
                     bool isLikelyEmptyFrame = frame.Take(10).All(b => b == 127 || b == 255);
                     if (isLikelyEmptyFrame) _emptyFrames++;
 
+                    // Анализ громкости для музыки (проверяем разнообразие значений)
+                    var sampleRange = frame.Take(20).Select(b => Math.Abs(b - 127)).Max();
+                    if (sampleRange < 10) _lowVolumeFrames++; // Очень мало динамики
+
                     // Логируем первые кадры с анализом качества
                     if (_sampleIndex < 3200 || _sampleIndex % (8000 * 5) == 0)
                     {
                         _logger.LogInformation($"WavAudioSource: отправлен кадр #{_sampleIndex / 160}, {(double)_sampleIndex / 8000:F1}с");
                     }
 
-                    // Периодический отчет о качестве (каждые 10 секунд)
-                    if (DateTime.Now - _lastQualityReport > TimeSpan.FromSeconds(10))
+                    // Периодический отчет о качестве (каждые 30 секунд)
+                    if (DateTime.Now - _lastQualityReport > TimeSpan.FromSeconds(30))
                     {
                         ReportAudioQuality();
                         _lastQualityReport = DateTime.Now;
@@ -947,6 +951,7 @@ namespace ConsoleApp.WebServer
         private int _totalFramesSent = 0;
         private int _clippedSamples = 0;
         private int _emptyFrames = 0;
+        private int _lowVolumeFrames = 0; // Кадры с низкой громкостью (проблема для музыки)
         private DateTime _lastQualityReport = DateTime.Now;
 
         /// <summary>
@@ -997,11 +1002,13 @@ namespace ConsoleApp.WebServer
 
             double clippingRate = (double)_clippedSamples / (_totalFramesSent * _audioSettings.Quality.G711FrameSize) * 100;
             double emptyFrameRate = (double)_emptyFrames / _totalFramesSent * 100;
+            double lowVolumeRate = (double)_lowVolumeFrames / _totalFramesSent * 100;
 
             _logger.LogInformation("=== ОТЧЕТ О КАЧЕСТВЕ АУДИО ===");
             _logger.LogInformation($"Всего отправлено кадров: {_totalFramesSent}");
             _logger.LogInformation($"Клиппинг сэмплов: {_clippedSamples} ({clippingRate:F2}%)");
             _logger.LogInformation($"Пустых кадров: {_emptyFrames} ({emptyFrameRate:F2}%)");
+            _logger.LogInformation($"Кадров с низким уровнем: {_lowVolumeFrames} ({lowVolumeRate:F2}%)");
 
             // Рекомендации по улучшению качества
             _logger.LogInformation("=== РЕКОМЕНДАЦИИ ПО ОПТИМИЗАЦИИ ===");
@@ -1031,6 +1038,24 @@ namespace ConsoleApp.WebServer
             else
             {
                 _logger.LogInformation($"✅ Уровень пустых кадров в норме ({emptyFrameRate:F1}%)");
+            }
+
+            // Специальный анализ для музыки
+            if (lowVolumeRate > 20.0)
+            {
+                _logger.LogWarning($"🎵 ПРОБЛЕМЫ С МУЗЫКОЙ: много кадров с низкой динамикой ({lowVolumeRate:F1}%)");
+                _logger.LogInformation("➤ Для музыки: увеличьте AmplificationFactor до {0:F1}", _audioSettings.SignalProcessing.AmplificationFactor * 1.4);
+                _logger.LogInformation("➤ Для музыки: увеличьте FilterWindowSize до {0}", Math.Min(_audioSettings.SignalProcessing.FilterWindowSize + 2, 7));
+                _logger.LogInformation("➤ Для музыки: включите UseAntiAliasing=true");
+            }
+            else if (lowVolumeRate > 10.0)
+            {
+                _logger.LogInformation($"🎵 Динамика музыки может быть лучше ({lowVolumeRate:F1}% низких кадров)");
+                _logger.LogInformation("➤ Попробуйте немного увеличить AmplificationFactor");
+            }
+            else
+            {
+                _logger.LogInformation($"✅ Динамический диапазон хороший для музыки ({lowVolumeRate:F1}%)");
             }
 
             // Рекомендации по другим параметрам
