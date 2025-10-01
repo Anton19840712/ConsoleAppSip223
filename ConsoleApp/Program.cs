@@ -118,8 +118,16 @@ class SafeSipCaller
 	{
 		var services = new ServiceCollection();
 
-		// Добавляем сервисы приложения
-		services.AddApplicationServices();
+		// Настраиваем конфигурацию
+		var builder = new ConfigurationBuilder()
+			.SetBasePath(Directory.GetCurrentDirectory())
+			.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+
+		var configuration = builder.Build();
+		services.AddSingleton<IConfiguration>(configuration);
+
+		// Добавляем сервисы приложения с конфигурацией
+		services.AddApplicationServices(configuration);
 
 		_serviceProvider = services.BuildServiceProvider();
 	}
@@ -205,10 +213,10 @@ class SafeSipCaller
 
 			_loggingService!.LogInfo("Веб-сервер запущен на http://localhost:8080/");
 
-			// Автоматически открываем браузер
+			// Браузер отключен - работаем только через консольные команды
 			await Task.Delay(1000); // Даем время серверу запуститься
-			OpenBrowser("http://localhost:8080/");
-			_loggingService.LogInfo("Браузер открыт автоматически");
+			// OpenBrowser("http://localhost:8080/");
+			_loggingService.LogInfo("Веб-сервер готов (браузер не запускается автоматически)");
 		}
 		catch (Exception ex)
 		{
@@ -563,6 +571,7 @@ class SafeSipCaller
 		_loggingService.LogInfo("  g - тест генерации аудио (3 секунды, без SIP)");
 		_loggingService.LogInfo("  c - совершить звонок");
 		_loggingService.LogInfo("  h - завершить звонок");
+		_loggingService.LogInfo("  r - отчет о качестве аудио");
 		_loggingService.LogInfo("  q - выйти из программы");
 		_loggingService.LogInfo("");
 
@@ -590,6 +599,12 @@ class SafeSipCaller
 							{
 								_userAgent.Hangup();
 							}
+							break;
+
+						case 'r':
+							Console.WriteLine("► Генерируем отчет о качестве аудио...");
+							_loggingService.LogInfo("Запрос отчета о качестве аудио");
+							RequestAudioQualityReport();
 							break;
 
 						case 'q':
@@ -773,6 +788,36 @@ class SafeSipCaller
 	/// <summary>
 	/// Пересоздает медиа-сессию с новым аудио источником
 	/// </summary>
+	/// <summary>
+	/// Запрашивает отчет о качестве аудио от текущего источника
+	/// </summary>
+	private static void RequestAudioQualityReport()
+	{
+		try
+		{
+			if (_isWavMode && _wavAudioSource != null)
+			{
+				_wavAudioSource.ReportAudioQuality();
+			}
+			else if (_isTtsMode)
+			{
+				_loggingService?.LogInfo("Отчет о качестве доступен только для WAV режима");
+			}
+			else if (_isTestMode)
+			{
+				_loggingService?.LogInfo("Отчет о качестве доступен только для WAV режима");
+			}
+			else
+			{
+				_loggingService?.LogInfo("Отчет о качестве доступен только для WAV режима");
+			}
+		}
+		catch (Exception ex)
+		{
+			_loggingService?.LogError($"Ошибка при создании отчета о качестве: {ex.Message}");
+		}
+	}
+
 	private static Task RecreateMediaSession()
 	{
 		try

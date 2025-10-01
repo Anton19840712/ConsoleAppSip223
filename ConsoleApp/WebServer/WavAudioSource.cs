@@ -1,7 +1,9 @@
 using SIPSorceryMedia.Abstractions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NAudio.Wave;
 using NAudio.MediaFoundation;
+using ConsoleApp.Configuration;
 
 namespace ConsoleApp.WebServer
 {
@@ -12,13 +14,20 @@ namespace ConsoleApp.WebServer
     public class WavAudioSource : IAudioSource, IDisposable
     {
         private readonly ILogger<WavAudioSource> _logger;
+        private readonly AudioSettings _audioSettings;
         private bool _isStarted = false;
         private bool _isPaused = false;
         private Timer? _sendTimer;
 
+
         // Буфер для хранения аудио данных из WAV файла
         private Queue<byte[]> _audioBuffer = new Queue<byte[]>();
         private readonly object _bufferLock = new object();
+
+        // Кэшированные аудио данные для избежания перезагрузки файла
+        private Queue<byte[]> _cachedAudioFrames = new Queue<byte[]>();
+        private readonly object _cacheLock = new object();
+        private bool _audioCacheLoaded = false;
 
         // Текущая позиция воспроизведения
         private int _sampleIndex = 0;
@@ -29,9 +38,10 @@ namespace ConsoleApp.WebServer
         };
         private int _currentFileIndex = 0;
 
-        public WavAudioSource(ILogger<WavAudioSource> logger)
+        public WavAudioSource(ILogger<WavAudioSource> logger, IOptions<AudioSettings> audioOptions)
         {
             _logger = logger;
+            _audioSettings = audioOptions.Value;
 
             try
             {
@@ -160,8 +170,8 @@ namespace ConsoleApp.WebServer
         {
             return new List<AudioFormat>
             {
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA),      // G.711 A-law 8kHz (COMPATIBLE)
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU),      // G.711 μ-law 8kHz
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU),      // G.711 μ-law 8kHz (PRIMARY - как в качественной передаче)
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA),      // G.711 A-law 8kHz (BACKUP)
                 new AudioFormat(SDPWellKnownMediaFormatsEnum.G722),      // HD voice 16kHz (if supported)
                 new AudioFormat(SDPWellKnownMediaFormatsEnum.G729),      // Compressed but good quality
             };
@@ -191,8 +201,8 @@ namespace ConsoleApp.WebServer
         {
             if (_isStarted)
             {
-                _logger.LogWarning("WavAudioSource: уже запущен");
-                return Task.CompletedTask;
+                _logger.LogWarning("WavAudioSource: уже запущен - принудительно перезапускаем");
+                StopAudio();
             }
 
             _isStarted = true;
@@ -203,8 +213,12 @@ namespace ConsoleApp.WebServer
             LoadNextWavFile();
 
             // Запускаем таймер отправки кадров
-            _sendTimer = new Timer(SendAudioFrame, null, 0, 20);
-            _logger.LogInformation("WavAudioSource: таймер запущен (интервал 20ms)");
+            _sendTimer = new Timer(SendAudioFrame, null, 0, _audioSettings.Quality.TimerIntervalMs);
+            _logger.LogInformation($"WavAudioSource: таймер запущен (интервал {_audioSettings.Quality.TimerIntervalMs}ms)");
+
+            // Проверяем подписчиков
+            _logger.LogInformation($"WavAudioSource: подписчики OnAudioSourceEncodedSample: {OnAudioSourceEncodedSample != null}");
+
             return Task.CompletedTask;
         }
 
@@ -215,6 +229,25 @@ namespace ConsoleApp.WebServer
         {
             try
             {
+                // Если кэш уже загружен, используем его для циклического воспроизведения
+                if (_audioCacheLoaded)
+                {
+                    lock (_bufferLock)
+                    {
+                        lock (_cacheLock)
+                        {
+                            // Копируем кэшированные кадры в буфер воспроизведения
+                            var cachedFrames = _cachedAudioFrames.ToArray();
+                            foreach (var frame in cachedFrames)
+                            {
+                                _audioBuffer.Enqueue(frame);
+                            }
+                        }
+                    }
+                    _logger.LogInformation("Перезагружен кэшированный аудио для циклического воспроизведения");
+                    return;
+                }
+
                 var wavDir = Path.Combine(Directory.GetCurrentDirectory(), "TestWavFiles");
 
                 // Ищем первый доступный файл
@@ -241,7 +274,7 @@ namespace ConsoleApp.WebServer
                     return;
                 }
 
-                Console.WriteLine($"🎵 WavAudioSource: загружается {foundFile}");
+                // Console.WriteLine($"🎵 WavAudioSource: загружается {foundFile}");
                 _logger.LogInformation("Загружается аудио файл: {FileName}", foundFile);
 
                 // Используем NAudio для универсальной загрузки
@@ -253,7 +286,7 @@ namespace ConsoleApp.WebServer
             catch (Exception ex)
             {
                 _logger.LogError($"Ошибка загрузки аудио файла: {ex.Message}");
-                Console.WriteLine($"✗ Ошибка загрузки аудио: {ex.Message}");
+                // Console.WriteLine($"✗ Ошибка загрузки аудио: {ex.Message}");
             }
         }
 
@@ -264,7 +297,7 @@ namespace ConsoleApp.WebServer
         {
             try
             {
-                Console.WriteLine($"🔍 Загружается файл: {Path.GetFileName(filePath)}");
+                // Console.WriteLine($"🔍 Загружается файл: {Path.GetFileName(filePath)}");
 
                 // Для файла privet.wav принудительно используем fallback метод
                 if (Path.GetFileName(filePath).ToLowerInvariant().Contains("privet"))
@@ -274,17 +307,17 @@ namespace ConsoleApp.WebServer
 
                 using var reader = new AudioFileReader(filePath);
 
-                Console.WriteLine($"📊 Исходный формат: {reader.WaveFormat.SampleRate}Hz, {reader.WaveFormat.Channels} каналов, {reader.WaveFormat.BitsPerSample}bit");
+                // Console.WriteLine($"📊 Исходный формат: {reader.WaveFormat.SampleRate}Hz, {reader.WaveFormat.Channels} каналов, {reader.WaveFormat.BitsPerSample}bit");
                 _logger.LogInformation("Исходный формат: {SampleRate}Hz, {Channels} каналов, {Format}",
                     reader.WaveFormat.SampleRate, reader.WaveFormat.Channels, reader.WaveFormat);
 
                 // Проверяем длительность
                 var duration = reader.TotalTime;
-                Console.WriteLine($"⏱ Длительность файла: {duration.TotalSeconds:F1}с");
+                // Console.WriteLine($"Длительность файла: {duration.TotalSeconds:F1}с");
 
                 // Конвертируем в нужный формат: 8kHz, mono, 16-bit
                 var targetFormat = new WaveFormat(8000, 16, 1);
-                Console.WriteLine($"🎯 Целевой формат: {targetFormat.SampleRate}Hz, {targetFormat.Channels} каналов, {targetFormat.BitsPerSample}bit");
+                // Console.WriteLine($"Целевой формат: {targetFormat.SampleRate}Hz, {targetFormat.Channels} каналов, {targetFormat.BitsPerSample}bit");
 
                 using var resampler = new MediaFoundationResampler(reader, targetFormat);
 
@@ -303,7 +336,7 @@ namespace ConsoleApp.WebServer
                     totalBytesRead += bytesRead;
                 }
 
-                Console.WriteLine($"✓ Прочитано: {totalBytesRead} байт PCM, {samples.Count/2/8000:F1}с аудио");
+                // Console.WriteLine($"Прочитано: {totalBytesRead} байт PCM, {samples.Count/2/8000:F1}с аудио");
                 _logger.LogInformation("Конвертировано {Bytes} байт PCM, длительность {Duration:F1}с",
                     samples.Count, (double)samples.Count/2/8000);
 
@@ -319,7 +352,7 @@ namespace ConsoleApp.WebServer
                             Console.Write($"{sample} ");
                         }
                     }
-                    Console.WriteLine();
+                    // Console.WriteLine();
                 }
 
                 // Конвертируем PCM в G.711 кадры
@@ -328,7 +361,7 @@ namespace ConsoleApp.WebServer
             catch (Exception ex)
             {
                 _logger.LogError($"Ошибка обработки аудио файла: {ex.Message}");
-                Console.WriteLine($"✗ Ошибка NAudio: {ex.Message}");
+                // Console.WriteLine($"Ошибка NAudio: {ex.Message}");
 
                 // Fallback: попробуем как обычный WAV
                 var wavData = File.ReadAllBytes(filePath);
@@ -387,8 +420,8 @@ namespace ConsoleApp.WebServer
             // Определяем целевую частоту дискретизации для выбранного кодека
             int targetSampleRate = _currentFormat.FormatID switch
             {
-                (int)SDPWellKnownMediaFormatsEnum.G722 => 16000,  // G.722 использует 16kHz
-                _ => 8000   // G.711, G.729 используют 8kHz
+                (int)SDPWellKnownMediaFormatsEnum.G722 => _audioSettings.Quality.AudioSampleRate16K,  // G.722 использует 16kHz
+                _ => _audioSettings.Quality.AudioSampleRate8K   // G.711, G.729 используют 8kHz
             };
 
             _logger.LogInformation($"Конвертируем {sourceSampleRate}Hz {sourceChannels}ch в {targetSampleRate}Hz mono для {_currentFormat.FormatName}");
@@ -400,29 +433,48 @@ namespace ConsoleApp.WebServer
                 // Извлекаем PCM данные
                 var pcmData = new ArraySegment<byte>(wavData, dataOffset, wavData.Length - dataOffset);
 
-                // Улучшенный downsampling с простым фильтром
-                int downsampleRatio = sourceSampleRate / targetSampleRate; // 44100/8000 = 5.5 ≈ 5 или 44100/16000 = 2.75 ≈ 3
-                if (downsampleRatio < 1) downsampleRatio = 1;
+                // Точный downsampling с floating-point расчетом
+                double exactRatio = (double)sourceSampleRate / targetSampleRate; // 44100/8000 = 5.5125 точно
+                _logger.LogInformation($"Точный downsampling ratio: {exactRatio:F4} ({sourceSampleRate} -> {targetSampleRate})");
+            _logger.LogInformation($"Используемые параметры: Интерполяция={_audioSettings.Experimental.UseInterpolation}, AntiAliasing={_audioSettings.Experimental.UseAntiAliasing}, Усиление={_audioSettings.SignalProcessing.AmplificationFactor}");
 
-                _logger.LogInformation($"Downsampling ratio: {downsampleRatio}:1 ({sourceSampleRate} -> {targetSampleRate})");
+                // Применяем точный downsampling с выбранным методом
+                var filteredPcm = _audioSettings.Experimental.UseInterpolation ?
+                    ApplyPreciseDownsampling(pcmData, sourceChannels, exactRatio) :
+                    ApplySimpleDownsampling(pcmData, sourceChannels, exactRatio);
 
-                // Простой низкочастотный фильтр для уменьшения алиасинга
-                var filteredPcm = ApplySimpleLowPassFilter(pcmData, sourceChannels, downsampleRatio);
-
-                const int frameSize = 160; // семплов на кадр для G.711
+                int frameSize = _audioSettings.Quality.G711FrameSize; // семплов на кадр для G.711
                 var g711Frame = new byte[frameSize];
                 int framePos = 0;
 
-                for (int i = 0; i < filteredPcm.Count; i += sourceBitsPerSample / 8 * 1 * downsampleRatio) // 1 канал после фильтрации
+                for (int i = 0; i < filteredPcm.Count; i += 2) // Обрабатываем все downsampled сэмплы (моно, 16-bit)
                 {
                     if (i + 1 >= filteredPcm.Count) break;
 
-                    // Читаем отфильтрованный семпл
+                    // Читаем точно downsample-ированный семпл
                     short sample = (short)(filteredPcm[i] | (filteredPcm[i + 1] << 8));
 
                     // Небольшое усиление для компенсации потерь при фильтрации
-                    int amplifiedSample = (int)(sample * 1.2f);
-                    sample = (short)Math.Max(-32767, Math.Min(32767, amplifiedSample));
+                    int amplifiedSample = (int)(sample * _audioSettings.SignalProcessing.AmplificationFactor);
+                    short originalSample = sample;
+                    sample = (short)Math.Max(-_audioSettings.SignalProcessing.DynamicRangeLimit, Math.Min(_audioSettings.SignalProcessing.DynamicRangeLimit, amplifiedSample));
+
+                    // Анализ качества: проверка клиппинга
+                    if (Math.Abs(amplifiedSample) > _audioSettings.SignalProcessing.DynamicRangeLimit)
+                    {
+                        _clippedSamples++;
+                    }
+
+                    // Применяем анти-дребезжание фильтры
+                    if (_audioSettings.AntiDrebezzhanie.UseGaussianFilter)
+                    {
+                        sample = ApplyGaussianFilter(sample);
+                    }
+
+                    if (_audioSettings.AntiDrebezzhanie.UseDithering)
+                    {
+                        sample = ApplyDithering(sample);
+                    }
 
                     // Конвертируем в G.711
                     g711Frame[framePos] = _useAlaw ? LinearToALaw(sample) : LinearToMuLaw(sample);
@@ -437,6 +489,19 @@ namespace ConsoleApp.WebServer
                 }
 
                 _logger.LogInformation($"Создано {_audioBuffer.Count} G.711 кадров из {sourceSampleRate}Hz файла");
+
+                // Сохраняем в кэш для циклического воспроизведения
+                lock (_cacheLock)
+                {
+                    _cachedAudioFrames.Clear();
+                    var frames = _audioBuffer.ToArray();
+                    foreach (var frame in frames)
+                    {
+                        _cachedAudioFrames.Enqueue(frame);
+                    }
+                    _audioCacheLoaded = true;
+                    _logger.LogInformation("Аудио кэш сохранен для циклического воспроизведения");
+                }
             }
         }
 
@@ -470,30 +535,24 @@ namespace ConsoleApp.WebServer
                 // Добавляем в буфер для фильтрации
                 sampleBuffer.Add(sample);
 
-                // Применяем более качественный фильтр (окно 5 сэмплов)
-                if (sampleBuffer.Count >= 5)
+                // Применяем более качественный фильтр (окно для меньших артефактов)
+                if (_audioSettings.Experimental.UseAntiAliasing && sampleBuffer.Count >= _audioSettings.SignalProcessing.FilterWindowSize)
                 {
-                    // Берем взвешенное среднее для сглаживания высоких частот
-                    int filterSize = Math.Min(5, sampleBuffer.Count);
+                    // Берем простое среднее для сглаживания без искажений
+                    int filterSize = Math.Min(_audioSettings.SignalProcessing.FilterWindowSize, sampleBuffer.Count);
                     long sum = 0;
-                    int totalWeight = 0;
 
                     for (int j = 0; j < filterSize; j++)
                     {
-                        int weight = filterSize - j; // Больший вес для более свежих сэмплов
-                        sum += sampleBuffer[sampleBuffer.Count - 1 - j] * weight;
-                        totalWeight += weight;
+                        sum += sampleBuffer[sampleBuffer.Count - 1 - j];
                     }
 
-                    sample = (short)(sum / totalWeight);
+                    sample = (short)(sum / filterSize);
 
                     // Ограничиваем размер буфера
-                    if (sampleBuffer.Count > 10)
+                    if (sampleBuffer.Count > _audioSettings.SignalProcessing.SampleBufferLimit)
                         sampleBuffer.RemoveAt(0);
                 }
-
-                // Дополнительное ограничение динамического диапазона для G.711
-                sample = (short)Math.Max(-32000, Math.Min(32000, (int)sample));
 
                 // Добавляем отфильтрованный семпл
                 filteredData.Add((byte)(sample & 0xFF));
@@ -501,6 +560,97 @@ namespace ConsoleApp.WebServer
             }
 
             _logger.LogInformation($"Отфильтровано {filteredData.Count / 2} сэмплов");
+            return new ArraySegment<byte>(filteredData.ToArray());
+        }
+
+        /// <summary>
+        /// Точный downsampling с floating-point позиционированием для устранения артефактов
+        /// </summary>
+        private ArraySegment<byte> ApplyPreciseDownsampling(ArraySegment<byte> pcmData, int channels, double exactRatio)
+        {
+            var filteredData = new List<byte>();
+
+            _logger.LogInformation($"Точный downsampling: {channels} каналов, ratio {exactRatio:F4}");
+
+            double sourcePosition = 0.0; // Точная позиция в исходном сигнале
+
+            while (sourcePosition + 1 < pcmData.Count / (2 * channels))
+            {
+                int baseIndex = (int)Math.Floor(sourcePosition);
+                double fraction = sourcePosition - baseIndex;
+
+                int byteIndex = baseIndex * 2 * channels;
+
+                if (byteIndex + 2 * channels >= pcmData.Count) break;
+
+                // Линейная интерполяция между текущим и следующим сэмплом
+                short sample1Left = (short)(pcmData[byteIndex] | (pcmData[byteIndex + 1] << 8));
+                short sample1Right = channels == 2 && byteIndex + 3 < pcmData.Count ?
+                    (short)(pcmData[byteIndex + 2] | (pcmData[byteIndex + 3] << 8)) : sample1Left;
+
+                short sample2Left = sample1Left;
+                short sample2Right = sample1Right;
+
+                // Получаем следующий сэмпл для интерполяции
+                if (byteIndex + 2 * channels * 2 < pcmData.Count)
+                {
+                    sample2Left = (short)(pcmData[byteIndex + 2 * channels] | (pcmData[byteIndex + 2 * channels + 1] << 8));
+                    sample2Right = channels == 2 && byteIndex + 2 * channels + 3 < pcmData.Count ?
+                        (short)(pcmData[byteIndex + 2 * channels + 2] | (pcmData[byteIndex + 2 * channels + 3] << 8)) : sample2Left;
+                }
+
+                // Интерполяция
+                short interpLeft = (short)(sample1Left + (sample2Left - sample1Left) * fraction);
+                short interpRight = (short)(sample1Right + (sample2Right - sample1Right) * fraction);
+
+                // Смешиваем в моно
+                short monoSample = (short)((interpLeft + interpRight) / 2);
+
+                // Добавляем в выходной буфер
+                filteredData.Add((byte)(monoSample & 0xFF));
+                filteredData.Add((byte)((monoSample >> 8) & 0xFF));
+
+                // Переходим к следующей позиции
+                sourcePosition += exactRatio;
+            }
+
+            _logger.LogInformation($"Точный downsampling: {filteredData.Count / 2} выходных сэмплов");
+            return new ArraySegment<byte>(filteredData.ToArray());
+        }
+
+        /// <summary>
+        /// Простой downsampling без интерполяции для тестирования качества
+        /// </summary>
+        private ArraySegment<byte> ApplySimpleDownsampling(ArraySegment<byte> pcmData, int channels, double exactRatio)
+        {
+            var filteredData = new List<byte>();
+
+            _logger.LogInformation($"Простой downsampling: {channels} каналов, ratio {exactRatio:F4}");
+
+            // Берем каждый N-й сэмпл без интерполяции для проверки
+            int step = (int)Math.Round(exactRatio);
+
+            for (int i = 0; i < pcmData.Count - 1; i += step * 2 * channels)
+            {
+                if (i + 1 >= pcmData.Count) break;
+
+                // Читаем левый канал
+                short leftSample = (short)(pcmData[i] | (pcmData[i + 1] << 8));
+                short sample = leftSample;
+
+                // Если стерео, смешиваем каналы
+                if (channels == 2 && i + 3 < pcmData.Count)
+                {
+                    short rightSample = (short)(pcmData[i + 2] | (pcmData[i + 3] << 8));
+                    sample = (short)((leftSample + rightSample) / 2);
+                }
+
+                // Добавляем сэмпл без дополнительной обработки
+                filteredData.Add((byte)(sample & 0xFF));
+                filteredData.Add((byte)((sample >> 8) & 0xFF));
+            }
+
+            _logger.LogInformation($"Простой downsampling: {filteredData.Count / 2} выходных сэмплов");
             return new ArraySegment<byte>(filteredData.ToArray());
         }
 
@@ -514,7 +664,7 @@ namespace ConsoleApp.WebServer
                 // Очищаем старый буфер
                 _audioBuffer.Clear();
 
-                Console.WriteLine($"🔄 Конвертируем {pcmData.Length} байт PCM в G.711 ({(_useAlaw ? "A-law" : "μ-law")})");
+                // Console.WriteLine($"Конвертируем {pcmData.Length} байт PCM в G.711 ({(_useAlaw ? "A-law" : "μ-law")})");
 
                 // Разбиваем на кадры по 160 семплов (320 байт PCM = 160 байт G.711)
                 const int frameSize = 320; // 160 семплов * 2 байта на семпл
@@ -551,7 +701,7 @@ namespace ConsoleApp.WebServer
                         {
                             Console.Write($"{g711Frame[k]:X2} ");
                         }
-                        Console.WriteLine();
+                        // Console.WriteLine();
 
                         // Показываем исходные PCM сэмплы первого кадра
                         Console.Write($"🔢 PCM сэмплы первого кадра: ");
@@ -564,11 +714,11 @@ namespace ConsoleApp.WebServer
                                 Console.Write($"{pcmSample} ");
                             }
                         }
-                        Console.WriteLine();
+                        // Console.WriteLine();
                     }
                 }
 
-                Console.WriteLine($"✅ Создано {frameCount} G.711 кадров по {g711FrameSize} байт");
+                // Console.WriteLine($"Создано {frameCount} G.711 кадров по {g711FrameSize} байт");
             }
         }
 
@@ -630,7 +780,7 @@ namespace ConsoleApp.WebServer
             {
                 if (_sampleIndex < 1600)
                 {
-                    Console.WriteLine($"⚠ WavAudioSource: нет подписчиков на OnAudioSourceEncodedSample (кадр {_sampleIndex / 160})");
+                    _logger.LogWarning($"WavAudioSource: нет подписчиков на OnAudioSourceEncodedSample (кадр {_sampleIndex / 160})");
                 }
                 return;
             }
@@ -649,18 +799,30 @@ namespace ConsoleApp.WebServer
                 try
                 {
                     OnAudioSourceEncodedSample?.Invoke(8000, frame);
+                    _totalFramesSent++;
 
-                    // Логируем первые кадры
+                    // Быстрый анализ качества кадра (только первые 10 байт)
+                    bool isLikelyEmptyFrame = frame.Take(10).All(b => b == 127 || b == 255);
+                    if (isLikelyEmptyFrame) _emptyFrames++;
+
+                    // Логируем первые кадры с анализом качества
                     if (_sampleIndex < 3200 || _sampleIndex % (8000 * 5) == 0)
                     {
-                        Console.WriteLine($"🎶 WavAudioSource: отправлен кадр #{_sampleIndex / 160}, {(double)_sampleIndex / 8000:F1}с");
+                        _logger.LogInformation($"WavAudioSource: отправлен кадр #{_sampleIndex / 160}, {(double)_sampleIndex / 8000:F1}с");
+                    }
+
+                    // Периодический отчет о качестве (каждые 10 секунд)
+                    if (DateTime.Now - _lastQualityReport > TimeSpan.FromSeconds(10))
+                    {
+                        ReportAudioQuality();
+                        _lastQualityReport = DateTime.Now;
                     }
                 }
                 catch (ArgumentException ex) when (ex.Message.Contains("An empty destination was specified"))
                 {
                     if (_sampleIndex < 1600)
                     {
-                        Console.WriteLine($"⚠ WavAudioSource: RTP destination не установлен (звонок не активен) - кадр {_sampleIndex / 160}");
+                        _logger.LogWarning($"WavAudioSource: RTP destination не установлен (звонок не активен) - кадр {_sampleIndex / 160}");
                     }
                 }
                 catch (Exception ex)
@@ -724,10 +886,10 @@ namespace ConsoleApp.WebServer
         /// <summary>
         /// Конвертация в G.711 μ-law
         /// </summary>
-        private static byte LinearToMuLaw(short sample)
+        private byte LinearToMuLaw(short sample)
         {
-            const short BIAS = 132;
-            const short CLIP = 32635;
+            short BIAS = _audioSettings.G711Encoding.MuLawBias;
+            short CLIP = _audioSettings.G711Encoding.MuLawClip;
 
             int sign = (sample >> 8) & 0x80;
             if (sign != 0) sample = (short)-sample;
@@ -748,9 +910,9 @@ namespace ConsoleApp.WebServer
         /// <summary>
         /// Конвертация в G.711 A-law
         /// </summary>
-        private static byte LinearToALaw(short sample)
+        private byte LinearToALaw(short sample)
         {
-            const short CLIP = 32635;
+            short CLIP = _audioSettings.G711Encoding.ALawClip;
 
             bool isNegative = sample < 0;
             if (isNegative) sample = (short)-sample;
@@ -774,8 +936,121 @@ namespace ConsoleApp.WebServer
                 result = (byte)(((exponent - 1) << 4) | mantissa);
             }
 
-            if (!isNegative) result |= 0x80;
-            return (byte)(result ^ 0x55);
+            if (!isNegative) result |= _audioSettings.G711Encoding.ALawSignMask;
+            return (byte)(result ^ _audioSettings.G711Encoding.ALawXorMask);
+        }
+
+        private readonly Random _random = new Random();
+        private readonly Queue<short> _gaussianFilterBuffer = new Queue<short>();
+
+        // Метрики качества аудио
+        private int _totalFramesSent = 0;
+        private int _clippedSamples = 0;
+        private int _emptyFrames = 0;
+        private DateTime _lastQualityReport = DateTime.Now;
+
+        /// <summary>
+        /// Применяет Gaussian фильтр для уменьшения высокочастотного шума
+        /// </summary>
+        private short ApplyGaussianFilter(short sample)
+        {
+            _gaussianFilterBuffer.Enqueue(sample);
+
+            // Поддерживаем буфер размером 3 для простого Gaussian фильтра
+            while (_gaussianFilterBuffer.Count > 3)
+            {
+                _gaussianFilterBuffer.Dequeue();
+            }
+
+            if (_gaussianFilterBuffer.Count < 3)
+                return sample;
+
+            var buffer = _gaussianFilterBuffer.ToArray();
+            // Простой Gaussian фильтр с весами [0.25, 0.5, 0.25]
+            float filtered = (buffer[0] * 0.25f + buffer[1] * 0.5f + buffer[2] * 0.25f);
+            return (short)Math.Max(-32767, Math.Min(32767, (int)filtered));
+        }
+
+        /// <summary>
+        /// Применяет дибкэринг для уменьшения квантизационных искажений
+        /// </summary>
+        private short ApplyDithering(short sample)
+        {
+            if (_audioSettings.AntiDrebezzhanie.DitheringAmount <= 0)
+                return sample;
+
+            // Генерируем шум с треугольным распределением для лучшего дибкэринга
+            float noise1 = (float)(_random.NextDouble() - 0.5) * 2.0f;
+            float noise2 = (float)(_random.NextDouble() - 0.5) * 2.0f;
+            float triangularNoise = (noise1 + noise2) * _audioSettings.AntiDrebezzhanie.DitheringAmount;
+
+            int ditheredSample = sample + (int)(triangularNoise * 32.0f);
+            return (short)Math.Max(-32767, Math.Min(32767, ditheredSample));
+        }
+
+        /// <summary>
+        /// Создает отчет о качестве аудио и дает рекомендации по оптимизации
+        /// </summary>
+        public void ReportAudioQuality()
+        {
+            if (_totalFramesSent == 0) return;
+
+            double clippingRate = (double)_clippedSamples / (_totalFramesSent * _audioSettings.Quality.G711FrameSize) * 100;
+            double emptyFrameRate = (double)_emptyFrames / _totalFramesSent * 100;
+
+            _logger.LogInformation("=== ОТЧЕТ О КАЧЕСТВЕ АУДИО ===");
+            _logger.LogInformation($"Всего отправлено кадров: {_totalFramesSent}");
+            _logger.LogInformation($"Клиппинг сэмплов: {_clippedSamples} ({clippingRate:F2}%)");
+            _logger.LogInformation($"Пустых кадров: {_emptyFrames} ({emptyFrameRate:F2}%)");
+
+            // Рекомендации по улучшению качества
+            _logger.LogInformation("=== РЕКОМЕНДАЦИИ ПО ОПТИМИЗАЦИИ ===");
+
+            if (clippingRate > 5.0)
+            {
+                _logger.LogWarning($"🔴 ВЫСОКИЙ КЛИППИНГ ({clippingRate:F1}%)");
+                _logger.LogInformation("➤ Уменьшите AmplificationFactor с {0} до {1:F1}", _audioSettings.SignalProcessing.AmplificationFactor, _audioSettings.SignalProcessing.AmplificationFactor * 0.8);
+                _logger.LogInformation("➤ Или увеличьте DynamicRangeLimit до 32767");
+            }
+            else if (clippingRate > 1.0)
+            {
+                _logger.LogWarning($"🟡 УМЕРЕННЫЙ КЛИППИНГ ({clippingRate:F1}%)");
+                _logger.LogInformation("➤ Слегка уменьшите AmplificationFactor до {0:F1}", _audioSettings.SignalProcessing.AmplificationFactor * 0.9);
+            }
+            else
+            {
+                _logger.LogInformation($"✅ Клиппинг в норме ({clippingRate:F1}%)");
+            }
+
+            if (emptyFrameRate > 10.0)
+            {
+                _logger.LogWarning($"🔴 МНОГО ПУСТЫХ КАДРОВ ({emptyFrameRate:F1}%)");
+                _logger.LogInformation("➤ Увеличьте AmplificationFactor с {0} до {1:F1}", _audioSettings.SignalProcessing.AmplificationFactor, _audioSettings.SignalProcessing.AmplificationFactor * 1.2);
+                _logger.LogInformation("➤ Проверьте громкость исходного WAV файла");
+            }
+            else
+            {
+                _logger.LogInformation($"✅ Уровень пустых кадров в норме ({emptyFrameRate:F1}%)");
+            }
+
+            // Рекомендации по другим параметрам
+            if (_audioSettings.SignalProcessing.FilterWindowSize > 5)
+            {
+                _logger.LogInformation("➤ FilterWindowSize большой ({0}) - может увеличивать задержку. Попробуйте 2-3", _audioSettings.SignalProcessing.FilterWindowSize);
+            }
+
+            if (!_audioSettings.Experimental.UseInterpolation)
+            {
+                _logger.LogInformation("➤ UseInterpolation отключен - может ухудшать качество при downsampling");
+            }
+
+            _logger.LogInformation("=== ТЕКУЩИЕ НАСТРОЙКИ ===");
+            _logger.LogInformation($"AmplificationFactor: {_audioSettings.SignalProcessing.AmplificationFactor}");
+            _logger.LogInformation($"FilterWindowSize: {_audioSettings.SignalProcessing.FilterWindowSize}");
+            _logger.LogInformation($"DynamicRangeLimit: {_audioSettings.SignalProcessing.DynamicRangeLimit}");
+            _logger.LogInformation($"UseInterpolation: {_audioSettings.Experimental.UseInterpolation}");
+            _logger.LogInformation($"UseAntiAliasing: {_audioSettings.Experimental.UseAntiAliasing}");
+            _logger.LogInformation("===============================");
         }
 
         public void Dispose()

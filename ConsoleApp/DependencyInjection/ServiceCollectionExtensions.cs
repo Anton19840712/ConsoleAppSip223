@@ -2,14 +2,16 @@ using ConsoleApp.Services;
 using ConsoleApp.WebServer;
 using ConsoleApp.SipOperations;
 using ConsoleApp.States;
+using ConsoleApp.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 
 namespace ConsoleApp.DependencyInjection
 {
     public static class ServiceCollectionExtensions
     {
-        public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+        public static IServiceCollection AddApplicationServices(this IServiceCollection services, IConfiguration configuration)
         {
             // Настраиваем встроенный логгер .NET с записью в файл
             services.AddLogging(builder =>
@@ -29,6 +31,9 @@ namespace ConsoleApp.DependencyInjection
                 // Консольный логгер отключен для чистого вывода команд
                 // builder.AddConsole();
             });
+
+            // Регистрируем конфигурацию аудио
+            services.Configure<AudioSettings>(configuration.GetSection("AudioSettings"));
 
             // Регистрируем наш сервис логирования
             services.AddSingleton<ILoggingService, LoggingService>();
@@ -65,7 +70,8 @@ namespace ConsoleApp.DependencyInjection
             services.AddSingleton<WavAudioSource>(provider =>
             {
                 var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<WavAudioSource>();
-                return new WavAudioSource(logger);
+                var audioConfig = provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<AudioSettings>>();
+                return new WavAudioSource(logger, audioConfig);
             });
 
             // Регистрируем SipWorkflow
