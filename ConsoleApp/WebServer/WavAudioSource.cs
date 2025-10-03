@@ -69,11 +69,15 @@ namespace ConsoleApp.WebServer
         {
             try
             {
-                var wavDir = Path.Combine(Directory.GetCurrentDirectory(), "TestWavFiles");
+                // Ищем директорию проекта (поднимаемся из bin/Debug/net8.0)
+                var projectDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\"));
+                var wavDir = Path.Combine(projectDir, "TestWavFiles");
+
+                // Просто проверяем наличие файлов, не создаем директорию
                 if (!Directory.Exists(wavDir))
                 {
-                    Directory.CreateDirectory(wavDir);
-                    _logger.LogInformation("Создана папка для WAV файлов: {WavDir}", wavDir);
+                    _logger.LogWarning("Директория TestWavFiles не найдена: {WavDir}", wavDir);
+                    return;
                 }
 
                 // Проверяем наличие файлов
@@ -91,9 +95,7 @@ namespace ConsoleApp.WebServer
 
                 if (!hasFiles)
                 {
-                    // Создаем простой тестовый WAV файл программно
-                    CreateTestWavFile(Path.Combine(wavDir, _audioFiles[0]));
-                    _logger.LogInformation("Создан тестовый WAV файл: {FileName}", _audioFiles[0]);
+                    _logger.LogWarning("Аудио файлы не найдены в директории: {WavDir}", wavDir);
                 }
             }
             catch (Exception ex)
@@ -209,6 +211,11 @@ namespace ConsoleApp.WebServer
             _isPaused = false;
             _logger.LogInformation("WavAudioSource: запуск воспроизведения WAV файлов");
 
+            // Начинаем сбор переданного аудио
+            _isCollectingTransmittedAudio = true;
+            _transmittedFrames.Clear();
+            _logger.LogInformation("WavAudioSource: начат сбор переданного аудио для анализа");
+
             // Загружаем первый WAV файл
             LoadNextWavFile();
 
@@ -248,7 +255,9 @@ namespace ConsoleApp.WebServer
                     return;
                 }
 
-                var wavDir = Path.Combine(Directory.GetCurrentDirectory(), "TestWavFiles");
+                // Ищем директорию проекта (поднимаемся из bin/Debug/net8.0)
+                var projectDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\"));
+                var wavDir = Path.Combine(projectDir, "TestWavFiles");
 
                 // Ищем первый доступный файл
                 string? foundFile = null;
@@ -798,6 +807,12 @@ namespace ConsoleApp.WebServer
             {
                 try
                 {
+                    // Сохраняем переданный кадр для анализа
+                    if (_isCollectingTransmittedAudio)
+                    {
+                        _transmittedFrames.Add((byte[])frame.Clone());
+                    }
+
                     OnAudioSourceEncodedSample?.Invoke(8000, frame);
                     _totalFramesSent++;
 
@@ -853,6 +868,13 @@ namespace ConsoleApp.WebServer
             _isStarted = false;
             _sendTimer?.Dispose();
             _sendTimer = null;
+
+            // Сохраняем переданное аудио перед остановкой
+            if (_isCollectingTransmittedAudio && _transmittedFrames.Count > 0)
+            {
+                SaveTransmittedAudioToWav();
+                _isCollectingTransmittedAudio = false;
+            }
 
             lock (_bufferLock)
             {
@@ -954,6 +976,10 @@ namespace ConsoleApp.WebServer
         private int _lowVolumeFrames = 0; // Кадры с низкой громкостью (проблема для музыки)
         private DateTime _lastQualityReport = DateTime.Now;
 
+        // Коллектор переданного аудио для анализа
+        private List<byte[]> _transmittedFrames = new List<byte[]>();
+        private bool _isCollectingTransmittedAudio = false;
+
         /// <summary>
         /// Применяет Gaussian фильтр для уменьшения высокочастотного шума
         /// </summary>
@@ -991,6 +1017,117 @@ namespace ConsoleApp.WebServer
 
             int ditheredSample = sample + (int)(triangularNoise * 32.0f);
             return (short)Math.Max(-32767, Math.Min(32767, ditheredSample));
+        }
+
+        /// <summary>
+        /// Сохраняет переданное аудио в WAV файл для анализа
+        /// </summary>
+        private void SaveTransmittedAudioToWav()
+        {
+            try
+            {
+                // Ищем директорию проекта
+                var projectDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\"));
+                var wavDir = Path.Combine(projectDir, "TestWavFiles");
+                var outputPath = Path.Combine(wavDir, "privet_transmitted.wav");
+
+                _logger.LogInformation($"Сохранение переданного аудио: {_transmittedFrames.Count} кадров");
+
+                // Декодируем G.711 обратно в PCM
+                var pcmSamples = new List<short>();
+                foreach (var frame in _transmittedFrames)
+                {
+                    foreach (var g711Byte in frame)
+                    {
+                        short pcmSample = _useAlaw ? ALawToLinear(g711Byte) : MuLawToLinear(g711Byte);
+                        pcmSamples.Add(pcmSample);
+                    }
+                }
+
+                _logger.LogInformation($"Декодировано {pcmSamples.Count} PCM сэмплов");
+
+                // Записываем WAV файл (8kHz, 16-bit, mono)
+                using var fs = new FileStream(outputPath, FileMode.Create);
+                using var writer = new BinaryWriter(fs);
+
+                int sampleRate = 8000;
+                int channels = 1;
+                int bitsPerSample = 16;
+                int dataSize = pcmSamples.Count * 2;
+
+                // WAV заголовок
+                writer.Write("RIFF".ToCharArray());
+                writer.Write(36 + dataSize); // Размер файла - 8
+                writer.Write("WAVE".ToCharArray());
+
+                // fmt chunk
+                writer.Write("fmt ".ToCharArray());
+                writer.Write(16); // Размер fmt chunk
+                writer.Write((short)1); // PCM
+                writer.Write((short)channels); // Mono
+                writer.Write(sampleRate);
+                writer.Write(sampleRate * channels * bitsPerSample / 8); // Byte rate
+                writer.Write((short)(channels * bitsPerSample / 8)); // Block align
+                writer.Write((short)bitsPerSample);
+
+                // data chunk
+                writer.Write("data".ToCharArray());
+                writer.Write(dataSize);
+
+                foreach (var sample in pcmSamples)
+                {
+                    writer.Write(sample);
+                }
+
+                _logger.LogInformation($"✅ Переданное аудио сохранено: {outputPath}");
+                _logger.LogInformation($"   Длительность: {pcmSamples.Count / (double)sampleRate:F1}с, {_transmittedFrames.Count} кадров");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Ошибка сохранения переданного аудио: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Декодирование G.711 μ-law в PCM
+        /// </summary>
+        private short MuLawToLinear(byte muLawByte)
+        {
+            muLawByte = (byte)~muLawByte;
+            int sign = (muLawByte & 0x80);
+            int exponent = (muLawByte >> 4) & 0x07;
+            int mantissa = muLawByte & 0x0F;
+
+            int sample = (mantissa << 3) + 0x84;
+            sample <<= exponent;
+            sample -= 0x84;
+
+            if (sign != 0) sample = -sample;
+
+            return (short)sample;
+        }
+
+        /// <summary>
+        /// Декодирование G.711 A-law в PCM
+        /// </summary>
+        private short ALawToLinear(byte aLawByte)
+        {
+            aLawByte ^= 0x55;
+
+            int sign = (aLawByte & 0x80);
+            int exponent = (aLawByte >> 4) & 0x07;
+            int mantissa = aLawByte & 0x0F;
+
+            int sample = (mantissa << 4) + 8;
+            if (exponent != 0)
+            {
+                sample += 0x100;
+                sample <<= (exponent - 1);
+            }
+
+            if (sign != 0) sample = -sample;
+
+            return (short)sample;
         }
 
         /// <summary>

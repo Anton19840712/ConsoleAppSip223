@@ -98,6 +98,12 @@ class SafeSipCaller
 			StopWebServer();
 			_loggingService.LogInfo("Очистка завершена");
 
+			// Анализируем переданное аудио после звонка
+			if (_isWavMode)
+			{
+				await AnalyzeTransmittedAudio();
+			}
+
 			_forceExitTimer?.Dispose();
 			_loggingService.LogInfo("Программа завершена. Нажмите ENTER или подождите 3 секунды...");
 
@@ -408,12 +414,13 @@ class SafeSipCaller
 			_ttsAudioSource = _serviceProvider!.GetRequiredService<TtsAudioSource>();
 			_wavAudioSource = _serviceProvider!.GetRequiredService<WavAudioSource>();
 
-			// Изначально используем браузерный источник
-			IAudioSource audioSource = _browserAudioSource;
+			// Изначально используем WAV источник (по умолчанию)
+			_isWavMode = true;
+			IAudioSource audioSource = _wavAudioSource;
 			_loggingService.LogInfo("Инициализация: созданы все AudioSource (Browser, Test, TTS, WAV)");
-			_loggingService.LogInfo("По умолчанию используется BrowserAudioSource");
+			_loggingService.LogInfo("По умолчанию используется WavAudioSource для воспроизведения privet.wav");
 
-			// Создаем медиа-сессию с браузерным источником по умолчанию
+			// Создаем медиа-сессию с WAV источником по умолчанию
 			var mediaEndPoints = new MediaEndPoints
 			{
 				AudioSource = audioSource
@@ -436,8 +443,8 @@ class SafeSipCaller
 			// TODO: Добавить RTCP через правильный API SIPSorcery
 			_loggingService.LogInfo("TODO: Добавить RTCP для мониторинга качества");
 
-			_loggingService.LogInfo("Медиа-сессия создана с BrowserAudioSource!");
-			_loggingService.LogInfo("Теперь аудио из браузера будет передаваться в SIP RTP поток");
+			_loggingService.LogInfo("Медиа-сессия создана с WavAudioSource!");
+			_loggingService.LogInfo("Теперь будет воспроизводиться файл privet.wav через SIP RTP поток");
 
 			await Task.Delay(100);
 		}, _config.CallSettings.MediaTimeoutMs, cancellationToken);
@@ -1056,5 +1063,246 @@ class SafeSipCaller
 		{
 			_loggingService!.LogError($"Критическая ошибка очистки: {ex.Message}", ex);
 		}
+	}
+
+	/// <summary>
+	/// Анализирует переданное аудио и сравнивает с эталоном
+	/// </summary>
+	private static async Task AnalyzeTransmittedAudio()
+	{
+		try
+		{
+			var projectRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\"));
+			var wavDir = Path.Combine(projectRoot, "TestWavFiles");
+			var transmittedWav = Path.Combine(wavDir, "privet_transmitted.wav");
+			var referenceJson = Path.Combine(wavDir, "privet_reference.json");
+			var transmittedJson = Path.Combine(wavDir, "privet_transmitted.json");
+
+			_loggingService!.LogInfo("╔════════════════════════════════════════════════════════════╗");
+			_loggingService.LogInfo("║     АНАЛИЗ ПЕРЕДАННОГО АУДИО                               ║");
+			_loggingService.LogInfo("╚════════════════════════════════════════════════════════════╝");
+
+			// Проверяем наличие переданного файла
+			if (!File.Exists(transmittedWav))
+			{
+				_loggingService.LogWarning($"Переданный файл не найден: {transmittedWav}");
+				return;
+			}
+
+			_loggingService.LogInfo($"✓ Найден переданный файл: {Path.GetFileName(transmittedWav)}");
+			_loggingService.LogInfo($"✓ Размер: {new FileInfo(transmittedWav).Length / 1024.0:F2} KB");
+
+			// Запускаем анализатор
+			var analyzerProject = Path.Combine(projectRoot, "..", "AudioAnalyzer.Tests", "AudioAnalyzer.Tests.csproj");
+			_loggingService.LogInfo("🔍 Запускаем анализ переданного аудио...");
+
+			var startInfo = new System.Diagnostics.ProcessStartInfo
+			{
+				FileName = "dotnet",
+				Arguments = $"run --project \"{analyzerProject}\" -- \"{transmittedWav}\"",
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				UseShellExecute = false,
+				CreateNoWindow = true
+			};
+
+			using (var process = System.Diagnostics.Process.Start(startInfo))
+			{
+				if (process != null)
+				{
+					await process.WaitForExitAsync();
+
+					if (process.ExitCode == 0)
+					{
+						_loggingService.LogInfo("✅ Анализ переданного аудио завершен");
+					}
+					else
+					{
+						_loggingService.LogError($"❌ Ошибка анализа (код выхода: {process.ExitCode})");
+					}
+				}
+			}
+
+			// Проверяем результаты
+			if (File.Exists(transmittedJson))
+			{
+				_loggingService.LogInfo($"✅ Создан JSON: {Path.GetFileName(transmittedJson)}");
+
+				// Сравниваем с эталоном
+				if (File.Exists(referenceJson))
+				{
+					CompareAudioCharacteristics(referenceJson, transmittedJson);
+				}
+				else
+				{
+					_loggingService.LogWarning($"⚠ Эталонный JSON не найден: {Path.GetFileName(referenceJson)}");
+				}
+			}
+			else
+			{
+				_loggingService.LogWarning($"⚠ JSON не создан: {Path.GetFileName(transmittedJson)}");
+			}
+		}
+		catch (Exception ex)
+		{
+			_loggingService!.LogError($"Ошибка анализа переданного аудио: {ex.Message}", ex);
+		}
+	}
+
+	/// <summary>
+	/// Сравнивает характеристики эталона и переданного аудио
+	/// </summary>
+	private static void CompareAudioCharacteristics(string referenceJsonPath, string transmittedJsonPath)
+	{
+		try
+		{
+			_loggingService!.LogInfo("╔════════════════════════════════════════════════════════════╗");
+			_loggingService.LogInfo("║     СРАВНЕНИЕ ЭТАЛОНА И ПЕРЕДАННОГО АУДИО                  ║");
+			_loggingService.LogInfo("╚════════════════════════════════════════════════════════════╝");
+
+			var referenceJson = File.ReadAllText(referenceJsonPath);
+			var transmittedJson = File.ReadAllText(transmittedJsonPath);
+
+			var reference = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(referenceJson);
+			var transmitted = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(transmittedJson);
+
+			// Сравниваем ключевые параметры
+			_loggingService.LogInfo("📊 ОСНОВНЫЕ ПАРАМЕТРЫ:");
+			CompareParameter("Sample Rate", reference, transmitted, "sampleRate");
+			CompareParameter("Channels", reference, transmitted, "numChannels");
+			CompareParameter("Bits Per Sample", reference, transmitted, "bitsPerSample");
+
+			_loggingService.LogInfo("");
+			_loggingService.LogInfo("⚠ КАЧЕСТВО И АРТЕФАКТЫ:");
+			CompareParameter("Clipping %", reference, transmitted, "clippingPercentage");
+			CompareParameter("Silent Frames %", reference, transmitted, "silentFramePercentage");
+
+			_loggingService.LogInfo("");
+			_loggingService.LogInfo("📈 АМПЛИТУДА И ЭНЕРГИЯ:");
+			CompareParameter("RMS Amplitude", reference, transmitted, "rmsAmplitude");
+			CompareParameter("Dynamic Range dB", reference, transmitted, "dynamicRangeDb");
+			CompareParameter("Avg Energy", reference, transmitted, "avgEnergy");
+
+			_loggingService.LogInfo("");
+			_loggingService.LogInfo("🎵 СПЕКТРАЛЬНЫЕ ХАРАКТЕРИСТИКИ:");
+			CompareParameter("Spectral Centroid", reference, transmitted, "spectralCentroid");
+			CompareParameter("Avg Zero Crossing Rate", reference, transmitted, "avgZeroCrossingRate");
+
+			// Анализ проблем и рекомендации
+			AnalyzeQualityIssues(reference, transmitted);
+		}
+		catch (Exception ex)
+		{
+			_loggingService!.LogError($"Ошибка сравнения JSON: {ex.Message}", ex);
+		}
+	}
+
+	/// <summary>
+	/// Сравнивает один параметр между эталоном и переданным аудио
+	/// </summary>
+	private static void CompareParameter(string name, System.Text.Json.JsonElement reference, System.Text.Json.JsonElement transmitted, string propertyName)
+	{
+		try
+		{
+			if (reference.TryGetProperty(propertyName, out var refValue) &&
+			    transmitted.TryGetProperty(propertyName, out var transValue))
+			{
+				var refDouble = refValue.GetDouble();
+				var transDouble = transValue.GetDouble();
+				var diff = transDouble - refDouble;
+				var diffPercent = refDouble != 0 ? (diff / refDouble) * 100 : 0;
+
+				string indicator = Math.Abs(diffPercent) < 5 ? "✓" :
+				                  Math.Abs(diffPercent) < 20 ? "⚡" : "⚠";
+
+				_loggingService!.LogInfo($"   {indicator} {name,-25} Эталон: {refDouble,12:F2}  →  Передано: {transDouble,12:F2}  (Δ {diffPercent,6:F1}%)");
+			}
+		}
+		catch
+		{
+			// Игнорируем ошибки парсинга отдельных свойств
+		}
+	}
+
+	/// <summary>
+	/// Анализирует проблемы качества и предлагает решения
+	/// </summary>
+	private static void AnalyzeQualityIssues(System.Text.Json.JsonElement reference, System.Text.Json.JsonElement transmitted)
+	{
+		_loggingService!.LogInfo("");
+		_loggingService.LogInfo("╔════════════════════════════════════════════════════════════╗");
+		_loggingService.LogInfo("║     РЕКОМЕНДАЦИИ ПО УЛУЧШЕНИЮ КАЧЕСТВА                     ║");
+		_loggingService.LogInfo("╚════════════════════════════════════════════════════════════╝");
+
+		var issues = new List<string>();
+
+		// Проверяем клиппинг
+		if (transmitted.TryGetProperty("clippingPercentage", out var clip))
+		{
+			var clipValue = clip.GetDouble();
+			if (clipValue > 5)
+			{
+				issues.Add($"🔴 ВЫСОКИЙ КЛИППИНГ ({clipValue:F2}%)");
+				_loggingService.LogInfo($"   → Уменьшите AmplificationFactor в appsettings.json");
+			}
+			else if (clipValue > 1)
+			{
+				issues.Add($"🟡 Умеренный клиппинг ({clipValue:F2}%)");
+			}
+		}
+
+		// Проверяем динамический диапазон
+		if (reference.TryGetProperty("dynamicRangeDb", out var refDr) &&
+		    transmitted.TryGetProperty("dynamicRangeDb", out var transDr))
+		{
+			var refDrValue = refDr.GetDouble();
+			var transDrValue = transDr.GetDouble();
+			var drLoss = refDrValue - transDrValue;
+
+			if (drLoss > 20)
+			{
+				issues.Add($"🔴 БОЛЬШАЯ ПОТЕРЯ ДИНАМИЧЕСКОГО ДИАПАЗОНА ({drLoss:F1} dB)");
+				_loggingService.LogInfo($"   → Проверьте UseInterpolation=true");
+				_loggingService.LogInfo($"   → Увеличьте AmplificationFactor");
+			}
+			else if (drLoss > 10)
+			{
+				issues.Add($"🟡 Потеря динамического диапазона ({drLoss:F1} dB)");
+			}
+		}
+
+		// Проверяем энергию
+		if (reference.TryGetProperty("avgEnergy", out var refEnergy) &&
+		    transmitted.TryGetProperty("avgEnergy", out var transEnergy))
+		{
+			var refEnergyValue = refEnergy.GetDouble();
+			var transEnergyValue = transEnergy.GetDouble();
+			var energyLoss = ((refEnergyValue - transEnergyValue) / refEnergyValue) * 100;
+
+			if (energyLoss > 50)
+			{
+				issues.Add($"🔴 БОЛЬШАЯ ПОТЕРЯ ЭНЕРГИИ СИГНАЛА ({energyLoss:F1}%)");
+				_loggingService.LogInfo($"   → Увеличьте AmplificationFactor до 1.5-2.0");
+			}
+		}
+
+		if (issues.Count == 0)
+		{
+			_loggingService.LogInfo("   ✅ Качество передачи приемлемое");
+		}
+		else
+		{
+			_loggingService.LogInfo($"   Найдено проблем: {issues.Count}");
+			foreach (var issue in issues)
+			{
+				_loggingService.LogInfo($"   {issue}");
+			}
+		}
+
+		_loggingService.LogInfo("");
+		_loggingService.LogInfo("💡 Для изменения параметров отредактируйте appsettings.json:");
+		_loggingService.LogInfo("   - SignalProcessing.AmplificationFactor");
+		_loggingService.LogInfo("   - Experimental.UseInterpolation");
+		_loggingService.LogInfo("   - Experimental.UseAntiAliasing");
 	}
 }
