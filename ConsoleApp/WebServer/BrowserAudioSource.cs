@@ -1,6 +1,7 @@
 using SIPSorceryMedia.Abstractions;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
+using ConsoleApp.Configuration;
 
 namespace ConsoleApp.WebServer
 {
@@ -14,10 +15,45 @@ namespace ConsoleApp.WebServer
         private bool _isStarted = false;
         private bool _isPaused = false;
         private Timer? _sendTimer;
+        private AudioCharacteristicsProfile? _audioProfile;
 
         public BrowserAudioSource(ILogger<BrowserAudioSource> logger)
         {
             _logger = logger;
+            LoadAudioProfile();
+        }
+
+        /// <summary>
+        /// Загружает сохраненный профиль аудио характеристик
+        /// </summary>
+        private void LoadAudioProfile()
+        {
+            try
+            {
+                var projectRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\"));
+                var profilePath = Path.Combine(projectRoot, "AudioCharacteristicsProfile.json");
+
+                _audioProfile = AudioCharacteristicsProfile.LoadFromFile(profilePath);
+
+                if (_audioProfile != null)
+                {
+                    _logger.LogInformation("✅ Загружен профиль аудио характеристик из тестового режима");
+                    _logger.LogInformation($"   Усиление: {_audioProfile.AmplificationFactor:F2}");
+                    _logger.LogInformation($"   Интерполяция: {_audioProfile.UseInterpolation}");
+                    _logger.LogInformation($"   Anti-Aliasing: {_audioProfile.UseAntiAliasing}");
+                    _logger.LogInformation($"   Клиппинг (тест): {_audioProfile.MeasuredClippingPercentage:F2}%");
+                }
+                else
+                {
+                    _logger.LogWarning("⚠ Профиль не найден, используются параметры по умолчанию");
+                    _audioProfile = new AudioCharacteristicsProfile();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Ошибка загрузки профиля: {ex.Message}. Используются параметры по умолчанию");
+                _audioProfile = new AudioCharacteristicsProfile();
+            }
         }
 
         public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
@@ -256,7 +292,8 @@ namespace ConsoleApp.WebServer
             int sampleCount = pcmData.Length / 2;
             var l16Data = new byte[pcmData.Length];
 
-            _logger.LogDebug("Обрабатываем {SampleCount} PCM сэмплов → L16 с усилением {Gain}", sampleCount, AUDIO_GAIN);
+            float gain = GetAudioGain();
+            _logger.LogDebug("Обрабатываем {SampleCount} PCM сэмплов → L16 с усилением {Gain}", sampleCount, gain);
 
             for (int i = 0; i < sampleCount; i++)
             {
@@ -265,7 +302,7 @@ namespace ConsoleApp.WebServer
                 short sample = (short)(pcmData[byteIndex] | (pcmData[byteIndex + 1] << 8));
 
                 // Применяем усиление громкости с ограничением клиппинга
-                int amplifiedSample = (int)(sample * AUDIO_GAIN);
+                int amplifiedSample = (int)(sample * gain);
 
                 // Ограничиваем значение в пределах 16-bit signed integer
                 if (amplifiedSample > short.MaxValue)
@@ -310,7 +347,8 @@ namespace ConsoleApp.WebServer
             var g711Data = new byte[sampleCount];
 
             string formatName = _useAlaw ? "A-law" : "μ-law";
-            _logger.LogDebug("Обрабатываем {SampleCount} PCM сэмплов → G.711 {FormatName}", sampleCount, formatName);
+            float gain = GetAudioGain();
+            _logger.LogDebug("Обрабатываем {SampleCount} PCM сэмплов → G.711 {FormatName} с усилением {Gain}", sampleCount, formatName, gain);
 
             for (int i = 0; i < sampleCount; i++)
             {
@@ -319,7 +357,7 @@ namespace ConsoleApp.WebServer
                 short sample = (short)(pcmData[byteIndex] | (pcmData[byteIndex + 1] << 8));
 
                 // Применяем усиление громкости с ограничением клиппинга
-                int amplifiedSample = (int)(sample * AUDIO_GAIN);
+                int amplifiedSample = (int)(sample * gain);
 
                 // Ограничиваем значение в пределах 16-bit signed integer
                 if (amplifiedSample > short.MaxValue)
@@ -332,7 +370,7 @@ namespace ConsoleApp.WebServer
                 // Дополнительная проверка и отладка первых сэмплов
                 if (i < 5)
                 {
-                    _logger.LogTrace("Сэмпл {Index}: исходный={Sample}, усиленный={FinalSample} (gain={Gain})", i, sample, finalSample, AUDIO_GAIN);
+                    _logger.LogTrace("Сэмпл {Index}: исходный={Sample}, усиленный={FinalSample} (gain={Gain})", i, sample, finalSample, gain);
                 }
 
                 // Конвертируем в G.711 (μ-law или A-law автоматически)
@@ -345,7 +383,15 @@ namespace ConsoleApp.WebServer
 
         private static bool _useAlaw = false; // Будет установлено при выборе формата
         private static bool _useLinearPCM = false; // Для L16 формата
-        private const float AUDIO_GAIN = 2.0f; // Усиление громкости (можно настроить от 1.0 до 4.0)
+        private const float AUDIO_GAIN = 2.0f; // Усиление громкости по умолчанию (можно настроить от 1.0 до 4.0)
+
+        /// <summary>
+        /// Получает коэффициент усиления из профиля или использует значение по умолчанию
+        /// </summary>
+        private float GetAudioGain()
+        {
+            return _audioProfile != null ? (float)_audioProfile.AmplificationFactor : AUDIO_GAIN;
+        }
 
         /// <summary>
         /// Конвертирует линейный PCM в G.711 формат (A-law или μ-law)

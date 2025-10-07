@@ -15,7 +15,7 @@ namespace ConsoleApp.WebServer
         private Func<object>? _getRegistrationStatus;
         private Func<object>? _getCallStatus;
 
-        public SimpleHttpServer(ILogger<SimpleHttpServer> logger, string url = "http://localhost:8080/")
+        public SimpleHttpServer(ILogger<SimpleHttpServer> logger, string url = "http://localhost:8081/")
         {
             _logger = logger;
             _url = url;

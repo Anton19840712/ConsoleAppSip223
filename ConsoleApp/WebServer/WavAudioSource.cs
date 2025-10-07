@@ -1147,6 +1147,9 @@ namespace ConsoleApp.WebServer
             _logger.LogInformation($"Пустых кадров: {_emptyFrames} ({emptyFrameRate:F2}%)");
             _logger.LogInformation($"Кадров с низким уровнем: {_lowVolumeFrames} ({lowVolumeRate:F2}%)");
 
+            // Сохраняем профиль характеристик для использования в Production режиме
+            SaveAudioCharacteristicsProfile(clippingRate, emptyFrameRate, lowVolumeRate);
+
             // Рекомендации по улучшению качества
             _logger.LogInformation("=== РЕКОМЕНДАЦИИ ПО ОПТИМИЗАЦИИ ===");
 
@@ -1213,6 +1216,39 @@ namespace ConsoleApp.WebServer
             _logger.LogInformation($"UseInterpolation: {_audioSettings.Experimental.UseInterpolation}");
             _logger.LogInformation($"UseAntiAliasing: {_audioSettings.Experimental.UseAntiAliasing}");
             _logger.LogInformation("===============================");
+        }
+
+        /// <summary>
+        /// Сохраняет профиль аудио характеристик для использования в Production режиме
+        /// </summary>
+        private void SaveAudioCharacteristicsProfile(double clippingRate, double emptyFrameRate, double lowVolumeRate)
+        {
+            try
+            {
+                var projectRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, @"..\..\..\"));
+                var profilePath = Path.Combine(projectRoot, "AudioCharacteristicsProfile.json");
+
+                var profile = new AudioCharacteristicsProfile
+                {
+                    AmplificationFactor = _audioSettings.SignalProcessing.AmplificationFactor,
+                    FilterWindowSize = _audioSettings.SignalProcessing.FilterWindowSize,
+                    UseInterpolation = _audioSettings.Experimental.UseInterpolation,
+                    UseAntiAliasing = _audioSettings.Experimental.UseAntiAliasing,
+                    DitheringAmount = _audioSettings.AntiDrebezzhanie.DitheringAmount,
+                    UseGaussianFilter = _audioSettings.AntiDrebezzhanie.UseGaussianFilter,
+                    UseDithering = _audioSettings.AntiDrebezzhanie.UseDithering,
+                    UsePreciseTiming = _audioSettings.AntiDrebezzhanie.UsePreciseTiming,
+                    JitterBufferSize = _audioSettings.AntiDrebezzhanie.JitterBufferSize,
+                    MeasuredClippingPercentage = clippingRate
+                };
+
+                profile.SaveToFile(profilePath);
+                _logger.LogInformation($"✅ Профиль аудио характеристик сохранен: {profilePath}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Ошибка сохранения профиля: {ex.Message}");
+            }
         }
 
         public void Dispose()

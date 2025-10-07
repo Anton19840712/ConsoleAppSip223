@@ -69,9 +69,30 @@ class SafeSipCaller
 			return;
 		}
 
-		
+
 		try
 		{
+			// Определяем режим работы приложения
+			bool isWavTest = _config.IsWavTest;
+			_loggingService.LogInfo($"╔════════════════════════════════════════════════════════════╗");
+			_loggingService.LogInfo($"║   РЕЖИМ РАБОТЫ: {(isWavTest ? "WAV TEST (тестирование файлов)" : "PRODUCTION (реальные звонки)"),-40} ║");
+			_loggingService.LogInfo($"╚════════════════════════════════════════════════════════════╝");
+
+			if (isWavTest)
+			{
+				_loggingService.LogInfo("📊 WAV TEST РЕЖИМ:");
+				_loggingService.LogInfo("   - Обработка WAV файлов для анализа качества");
+				_loggingService.LogInfo("   - Автоматическое сохранение профиля характеристик");
+				_loggingService.LogInfo("   - Оптимизация параметров звука");
+			}
+			else
+			{
+				_loggingService.LogInfo("🎙️ PRODUCTION РЕЖИМ:");
+				_loggingService.LogInfo("   - UI для совершения реальных звонков");
+				_loggingService.LogInfo("   - Использование сохраненных параметров из тестов");
+				_loggingService.LogInfo("   - Передача голоса с микрофона");
+			}
+
 			_loggingService.LogInfo("Сеть работает (проверено в предыдущем тесте)");
 			_loggingService.LogInfo($"Сервер доступен: {_config.SipConfiguration.Server} (5.135.215.43)");
 
@@ -217,11 +238,11 @@ class SafeSipCaller
 			// Запускаем сервер в фоновом режиме
 			_ = Task.Run(() => _webServer.StartAsync());
 
-			_loggingService!.LogInfo("Веб-сервер запущен на http://localhost:8080/");
+			_loggingService!.LogInfo("Веб-сервер запущен на http://localhost:8081/");
 
 			// Браузер отключен - работаем только через консольные команды
 			await Task.Delay(1000); // Даем время серверу запуститься
-			// OpenBrowser("http://localhost:8080/");
+			// OpenBrowser("http://localhost:8081/");
 			_loggingService.LogInfo("Веб-сервер готов (браузер не запускается автоматически)");
 		}
 		catch (Exception ex)
@@ -297,7 +318,7 @@ class SafeSipCaller
 		catch (Exception ex)
 		{
 			_loggingService!.LogWarning($"Не удалось автоматически открыть браузер: {ex.Message}");
-			_loggingService.LogInfo("Откройте браузер вручную: http://localhost:8080/");
+			_loggingService.LogInfo("Откройте браузер вручную: http://localhost:8081/");
 		}
 	}
 
@@ -414,19 +435,35 @@ class SafeSipCaller
 			_ttsAudioSource = _serviceProvider!.GetRequiredService<TtsAudioSource>();
 			_wavAudioSource = _serviceProvider!.GetRequiredService<WavAudioSource>();
 
-			// Изначально используем WAV источник (по умолчанию)
-			_isWavMode = true;
-			IAudioSource audioSource = _wavAudioSource;
-			_loggingService.LogInfo("Инициализация: созданы все AudioSource (Browser, Test, TTS, WAV)");
-			_loggingService.LogInfo("По умолчанию используется WavAudioSource для воспроизведения privet.wav");
+			// Выбираем источник аудио в зависимости от режима работы
+			IAudioSource audioSource;
+			bool isWavTest = _config.IsWavTest;
 
-			// Создаем медиа-сессию с WAV источником по умолчанию
+			if (isWavTest)
+			{
+				// В тестовом режиме используем WAV источник
+				_isWavMode = true;
+				audioSource = _wavAudioSource;
+				_loggingService.LogInfo("WAV TEST: используется WavAudioSource для обработки privet.wav");
+			}
+			else
+			{
+				// В production режиме используем Browser источник с параметрами из профиля
+				_isWavMode = false;
+				_isTtsMode = false;
+				_isTestMode = false;
+				audioSource = _browserAudioSource;
+				_loggingService.LogInfo("PRODUCTION: используется BrowserAudioSource с оптимизированными параметрами");
+			}
+
+			_loggingService.LogInfo("Инициализация: созданы все AudioSource (Browser, Test, TTS, WAV)");
+
+			// Создаем медиа-сессию с выбранным источником
 			var mediaEndPoints = new MediaEndPoints
 			{
 				AudioSource = audioSource
 			};
 			_mediaSession = new VoIPMediaSession(mediaEndPoints);
-			// _mediaSession = new VoIPMediaSession(); // Встроенный источник для сравнения
 
 			// Добавляем bandwidth control через SIPSorcery API
 			if (_mediaSession.AudioLocalTrack != null)
@@ -443,8 +480,7 @@ class SafeSipCaller
 			// TODO: Добавить RTCP через правильный API SIPSorcery
 			_loggingService.LogInfo("TODO: Добавить RTCP для мониторинга качества");
 
-			_loggingService.LogInfo("Медиа-сессия создана с WavAudioSource!");
-			_loggingService.LogInfo("Теперь будет воспроизводиться файл privet.wav через SIP RTP поток");
+			_loggingService.LogInfo($"Медиа-сессия создана с источником: {(isWavTest ? "WavAudioSource" : "BrowserAudioSource")}!");
 
 			await Task.Delay(100);
 		}, _config.CallSettings.MediaTimeoutMs, cancellationToken);
@@ -566,325 +602,78 @@ class SafeSipCaller
 			}
 		}, _config.CallSettings.CallTimeoutMs, cancellationToken);
 
-		_loggingService.LogInfo("Шаг 5: Готов к работе! Веб-сервер запущен на http://localhost:8080/");
-		_loggingService.LogInfo("Откройте браузер и нажмите кнопку для совершения звонка");
-		_loggingService.LogInfo("");
-		_loggingService.LogInfo("=== КОНСОЛЬНЫЕ КОМАНДЫ ===");
-		_loggingService.LogInfo("Введите команду и нажмите ENTER:");
-		_loggingService.LogInfo("  t - ТЕСТОВЫЙ режим (синтезированные тоны)");
-		_loggingService.LogInfo("  s - TTS режим (синтез речи)");
-		_loggingService.LogInfo("  w - WAV режим (воспроизведение файлов)");
-		_loggingService.LogInfo("  b - БРАУЗЕРНЫЙ режим (микрофон)");
-		_loggingService.LogInfo("  g - тест генерации аудио (3 секунды, без SIP)");
-		_loggingService.LogInfo("  c - совершить звонок");
-		_loggingService.LogInfo("  h - завершить звонок");
-		_loggingService.LogInfo("  r - отчет о качестве аудио");
-		_loggingService.LogInfo("  q - выйти из программы");
-		_loggingService.LogInfo("");
+		_loggingService.LogInfo("Шаг 5: Готов к работе! Веб-сервер запущен на http://localhost:8081/");
 
-		// Запускаем отдельный поток для чтения команд
-		_ = Task.Run(async () =>
+		// Определяем режим для автоматического запуска
+		bool isWavTest = _config.IsWavTest;
+
+		_loggingService.LogInfo("");
+		_loggingService.LogInfo("╔════════════════════════════════════════════════════════════╗");
+
+		if (isWavTest)
 		{
-			try
+			_loggingService.LogInfo("║   АВТОМАТИЧЕСКИЙ ЗАПУСК: WAV TEST (тест файлов)           ║");
+			_loggingService.LogInfo("╚════════════════════════════════════════════════════════════╝");
+			_loggingService.LogInfo("");
+			_loggingService.LogInfo("📊 Режим тестирования WAV:");
+			_loggingService.LogInfo("   - Воспроизведение WAV файла через SIP");
+			_loggingService.LogInfo("   - Анализ качества передачи");
+			_loggingService.LogInfo("   - Автоматическое сохранение профиля параметров");
+
+			// Автоматически совершаем звонок в WAV TEST режиме
+			_loggingService.LogInfo("");
+			_loggingService.LogInfo("⏳ Ожидание 2 секунды перед звонком...");
+			await Task.Delay(2000, cancellationToken);
+
+			_loggingService.LogInfo("📞 Автоматически совершаем звонок с WAV файлом...");
+
+			if (_userAgent != null && _mediaSession != null)
 			{
-				while (!cancellationToken.IsCancellationRequested)
+				string uri = $"sip:{_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}";
+				try
 				{
-					// Выводим приглашение прямо в консоль, а не в лог
-					Console.Write("Команда (t/s/w/b/g/c/h/q): ");
-					string? input = Console.ReadLine();
-
-					if (string.IsNullOrEmpty(input)) continue;
-
-					char command = input.ToLower()[0];
-
-					switch (command)
-					{
-						case 'h':
-							Console.WriteLine("► Завершаем активный звонок...");
-							_loggingService.LogInfo("Завершение активного звонка по команде пользователя");
-							if (_userAgent?.IsCallActive == true)
-							{
-								_userAgent.Hangup();
-							}
-							break;
-
-						case 'r':
-							Console.WriteLine("► Генерируем отчет о качестве аудио...");
-							_loggingService.LogInfo("Запрос отчета о качестве аудио");
-							RequestAudioQualityReport();
-							break;
-
-						case 'q':
-							Console.WriteLine("► Выход из программы...");
-							_loggingService.LogInfo("Выход по команде пользователя");
-							Environment.Exit(0);
-							break;
-
-						case 't':
-							if (_userAgent?.IsCallActive != true)
-							{
-								_isTestMode = true;
-								Console.WriteLine("► ТЕСТОВЫЙ РЕЖИМ активен (синтезированный голос 'Тест')");
-								_loggingService.LogInfo("ПЕРЕКЛЮЧЕН В ТЕСТОВЫЙ РЕЖИМ: будет использоваться синтезированный голос");
-
-								// Пересоздаем медиа-сессию с новым источником
-								RecreateMediaSession();
-							}
-							else
-							{
-								Console.WriteLine("✗ Нельзя переключать режим во время звонка");
-							}
-							break;
-
-						case 's':
-							if (_userAgent?.IsCallActive != true)
-							{
-								_isTestMode = false;
-								_isTtsMode = true;
-								Console.WriteLine("► TTS РЕЖИМ активен (синтез речи)");
-								_loggingService.LogInfo("ПЕРЕКЛЮЧЕН В TTS РЕЖИМ: будет использоваться синтез речи");
-
-								// Пересоздаем медиа-сессию с новым источником
-								RecreateMediaSession();
-							}
-							else
-							{
-								Console.WriteLine("✗ Нельзя переключать режим во время звонка");
-							}
-							break;
-
-						case 'w':
-							if (_userAgent?.IsCallActive != true)
-							{
-								_isTestMode = false;
-								_isTtsMode = false;
-								_isWavMode = true;
-								Console.WriteLine("► WAV РЕЖИМ активен (воспроизведение файлов)");
-								_loggingService.LogInfo("ПЕРЕКЛЮЧЕН В WAV РЕЖИМ: будет воспроизводиться WAV файл");
-
-								// Пересоздаем медиа-сессию с новым источником
-								RecreateMediaSession();
-							}
-							else
-							{
-								Console.WriteLine("✗ Нельзя переключать режим во время звонка");
-							}
-							break;
-
-						case 'b':
-							if (_userAgent?.IsCallActive != true)
-							{
-								_isTestMode = false;
-								_isTtsMode = false;
-								_isWavMode = false;
-								Console.WriteLine("► БРАУЗЕРНЫЙ РЕЖИМ активен (микрофон из браузера)");
-								_loggingService.LogInfo("ПЕРЕКЛЮЧЕН В БРАУЗЕРНЫЙ РЕЖИМ: будет использоваться микрофон из браузера");
-
-								// Пересоздаем медиа-сессию с новым источником
-								RecreateMediaSession();
-							}
-							else
-							{
-								Console.WriteLine("✗ Нельзя переключать режим во время звонка");
-							}
-							break;
-
-						case 'c':
-							string currentMode;
-							if (_isTestMode)
-								currentMode = "ТЕСТОВЫЙ (синтезированные тоны)";
-							else if (_isTtsMode)
-								currentMode = "TTS (синтез речи)";
-							else if (_isWavMode)
-								currentMode = "WAV (воспроизведение файлов)";
-							else
-								currentMode = "БРАУЗЕРНЫЙ (микрофон)";
-
-							Console.WriteLine($"► Инициируем звонок в режиме: {currentMode}");
-							_loggingService.LogInfo($"Инициируем звонок в режиме: {currentMode}");
-							if (_userAgent != null && _mediaSession != null && !_userAgent.IsCallActive)
-							{
-								string uri = $"sip:{_config.SipConfiguration.DestinationUser}@{_config.SipConfiguration.Server}";
-								try
-								{
-									// Устанавливаем состояние "Calling" перед началом звонка
-									_workflow?.HandleSipEvent("Calling");
-
-									await _userAgent.Call(uri, _config.SipConfiguration.CallerUsername, _config.SipConfiguration.CallerPassword, _mediaSession);
-									Console.WriteLine($"✓ Звонок инициирован на {uri}");
-									_loggingService.LogInfo($"Звонок инициирован на {uri} в режиме: {currentMode}");
-								}
-								catch (Exception ex)
-								{
-									Console.WriteLine($"✗ Ошибка при звонке: {ex.Message}");
-									_loggingService.LogError($"Ошибка при звонке: {ex.Message}");
-								}
-							}
-							else
-							{
-								Console.WriteLine("✗ Звонок уже активен или система не готова");
-							}
-							break;
-
-						case 'g':
-							Console.WriteLine("► Тест генерации аудио (3 секунды, без SIP)...");
-							_ = Task.Run(async () =>
-							{
-								if (_testAudioSource != null)
-								{
-									await _testAudioSource.StartAudio();
-									await Task.Delay(3000); // 3 секунды
-									_testAudioSource.StopAudio();
-									Console.WriteLine("► Тест генерации завершен");
-								}
-								else
-								{
-									Console.WriteLine("✗ TestAudioSource не инициализирован");
-								}
-							});
-							break;
-
-						default:
-							Console.WriteLine($"✗ Неизвестная команда: {command}");
-							break;
-					}
-
-					// Показываем текущий режим после каждой команды
-					string mode;
-					if (_isTestMode)
-						mode = "ТЕСТОВЫЙ";
-					else if (_isTtsMode)
-						mode = "TTS";
-					else if (_isWavMode)
-						mode = "WAV";
-					else
-						mode = "БРАУЗЕРНЫЙ";
-
-					Console.WriteLine($"Текущий режим: {mode}");
-					Console.WriteLine();
+					_workflow?.HandleSipEvent("Calling");
+					await _userAgent.Call(uri, _config.SipConfiguration.CallerUsername, _config.SipConfiguration.CallerPassword, _mediaSession);
+					_loggingService.LogInfo($"✅ Звонок инициирован на {uri}");
+				}
+				catch (Exception ex)
+				{
+					_loggingService.LogError($"❌ Ошибка при звонке: {ex.Message}");
 				}
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine($"Ошибка в потоке команд: {ex.Message}");
-				_loggingService.LogError($"Ошибка в потоке команд: {ex.Message}");
-			}
-		});
+		}
+		else
+		{
+			_loggingService.LogInfo("║   АВТОМАТИЧЕСКИЙ ЗАПУСК: PRODUCTION (реальные звонки)     ║");
+			_loggingService.LogInfo("╚════════════════════════════════════════════════════════════╝");
+			_loggingService.LogInfo("");
+			_loggingService.LogInfo("🎙️ Production режим:");
+			_loggingService.LogInfo("   - Веб-интерфейс: http://localhost:8081/");
+			_loggingService.LogInfo("   - Передача голоса с микрофона");
+			_loggingService.LogInfo("   - Использование оптимизированных параметров");
+			_loggingService.LogInfo("");
+			_loggingService.LogInfo("👉 Откройте браузер и совершите звонок через UI");
+		}
 
 		// Основной цикл ожидания
+		_loggingService.LogInfo("");
+		_loggingService.LogInfo("⏸️  Приложение работает. Нажмите Ctrl+C для остановки.");
+
 		while (!cancellationToken.IsCancellationRequested)
 		{
-
-			// Обработка активного звонка если он есть
 			if (_callActive)
 			{
-				_loggingService.LogInfo("ЗВОНОК АКТИВЕН! Медиа соединение установлено.");
-				_loggingService.LogInfo("Команды: 'h' - завершить звонок, 'q' - выйти");
-
-				// Продолжаем обрабатывать команды во время звонка
-				await Task.Delay(1000, cancellationToken);
+				// Звонок активен - просто ждем
+				await Task.Delay(5000, cancellationToken);
 			}
 			else
 			{
 				// Простой режим ожидания
-				await Task.Delay(500, cancellationToken);
+				await Task.Delay(1000, cancellationToken);
 			}
 		}
 	}
 
-	/// <summary>
-	/// Пересоздает медиа-сессию с новым аудио источником
-	/// </summary>
-	/// <summary>
-	/// Запрашивает отчет о качестве аудио от текущего источника
-	/// </summary>
-	private static void RequestAudioQualityReport()
-	{
-		try
-		{
-			if (_isWavMode && _wavAudioSource != null)
-			{
-				_wavAudioSource.ReportAudioQuality();
-			}
-			else if (_isTtsMode)
-			{
-				_loggingService?.LogInfo("Отчет о качестве доступен только для WAV режима");
-			}
-			else if (_isTestMode)
-			{
-				_loggingService?.LogInfo("Отчет о качестве доступен только для WAV режима");
-			}
-			else
-			{
-				_loggingService?.LogInfo("Отчет о качестве доступен только для WAV режима");
-			}
-		}
-		catch (Exception ex)
-		{
-			_loggingService?.LogError($"Ошибка при создании отчета о качестве: {ex.Message}");
-		}
-	}
-
-	private static Task RecreateMediaSession()
-	{
-		try
-		{
-			// Закрываем старую медиа-сессию
-			if (_mediaSession != null)
-			{
-				_mediaSession.Close("switching audio source");
-				((IDisposable)_mediaSession)?.Dispose();
-			}
-
-			// Выбираем нужный источник аудио
-			IAudioSource audioSource;
-			string mode;
-
-			if (_isTestMode)
-			{
-				audioSource = _testAudioSource!;
-				mode = "TestAudioSource";
-			}
-			else if (_isTtsMode)
-			{
-				audioSource = _ttsAudioSource!;
-				mode = "TtsAudioSource";
-			}
-			else if (_isWavMode)
-			{
-				audioSource = _wavAudioSource!;
-				mode = "WavAudioSource";
-			}
-			else
-			{
-				audioSource = _browserAudioSource!;
-				mode = "BrowserAudioSource";
-			}
-
-			// Создаем новую медиа-сессию
-			var mediaEndPoints = new MediaEndPoints
-			{
-				AudioSource = audioSource
-			};
-			_mediaSession = new VoIPMediaSession(mediaEndPoints);
-
-			// Настраиваем bandwidth control
-			if (_mediaSession.AudioLocalTrack != null)
-			{
-				_mediaSession.AudioLocalTrack.MaximumBandwidth = 64000;
-			}
-
-			Console.WriteLine($"✓ Медиа-сессия пересоздана с {mode}");
-			_loggingService!.LogInfo($"Медиа-сессия пересоздана с {mode}");
-		}
-		catch (Exception ex)
-		{
-			Console.WriteLine($"✗ Ошибка пересоздания медиа-сессии: {ex.Message}");
-			_loggingService!.LogError($"Ошибка пересоздания медиа-сессии: {ex.Message}");
-		}
-
-		return Task.CompletedTask;
-	}
 
 	/// <summary>
 	/// Выполняет асинхронную операцию с заданным таймаутом
